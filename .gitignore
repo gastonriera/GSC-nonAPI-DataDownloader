@@ -1,0 +1,12 @@
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Chrome build & test artifacts
+*.crx
+*.pem
+/test/
+
+# Editor directories
+.vscode/
+.idea/

@@ -1,0 +1,92 @@
+/* Styles for GSC non-API Data Downloader In-Page UI */
+
+.gsc-downloader-floating-btn {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 999999;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 18px;
+  background: linear-gradient(135deg, #1a73e8 0%, #1557b0 100%);
+  color: #ffffff;
+  font-family: 'Google Sans', Roboto, -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+  font-size: 13px;
+  font-weight: 500;
+  border: none;
+  border-radius: 28px;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(26, 115, 232, 0.4), 0 1px 3px rgba(0, 0, 0, 0.12);
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  user-select: none;
+}
+
+.gsc-downloader-floating-btn:hover {
+  background: linear-gradient(135deg, #1967d2 0%, #0d47a1 100%);
+  box-shadow: 0 6px 20px rgba(26, 115, 232, 0.5), 0 2px 5px rgba(0, 0, 0, 0.18);
+  transform: translateY(-2px);
+}
+
+.gsc-downloader-floating-btn:active {
+  transform: translateY(0);
+  box-shadow: 0 2px 8px rgba(26, 115, 232, 0.4);
+}
+
+.gsc-downloader-floating-btn svg {
+  width: 18px;
+  height: 18px;
+  fill: currentColor;
+}
+
+.gsc-downloader-toast {
+  position: fixed;
+  bottom: 80px;
+  right: 24px;
+  z-index: 1000000;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 20px;
+  background: #202124;
+  color: #ffffff;
+  font-family: 'Google Sans', Roboto, -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+  font-size: 13px;
+  font-weight: 400;
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.28);
+  opacity: 0;
+  transform: translateY(10px);
+  transition: opacity 0.25s ease, transform 0.25s ease;
+  pointer-events: none;
+}
+
+.gsc-downloader-toast.gsc-toast-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.gsc-downloader-toast.gsc-toast-success svg {
+  color: #81c995;
+}
+
+.gsc-downloader-toast.gsc-toast-info svg {
+  color: #8ab4f8;
+}
+
+.gsc-downloader-toast.gsc-toast-error svg {
+  color: #f28b82;
+}
+
+.gsc-downloader-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: #ffffff;
+  border-radius: 50%;
+  animation: gsc-spin 0.8s linear infinite;
+}
+
+@keyframes gsc-spin {
+  to { transform: rotate(360deg); }
+}
