@@ -1,18 +1,19 @@
 /**
- * GSC non-API Data Downloader - Content Script (v2.2.0)
+ * GSC non-API Data Downloader - Content Script (v3.0.0)
  * Automates Google Search Console's native Export menu ("Download Excel" / "Download CSV")
  * across the main report AND all sub-reports/drilldowns for:
  * 1. Page Indexing (Indexed pages + all "Why pages aren't indexed" reason drilldowns)
- * 2. Crawl Stats (Main 90-day chart export + all 4 breakdown table drilldowns:
- *    By response, By file type, By purpose, and By Googlebot type)
+ * 2. Crawl Stats (Universal 25-row pagination expansion, 90-day overview chart,
+ *    all crawl breakdown tables [By response, By file type, By purpose, By Googlebot type],
+ *    Host status [Robots.txt fetch, DNS resolution, Server connectivity], and Hosts)
  * 3. Core Web Vitals (Mobile & Desktop reports + Good URLs + all issue drilldowns)
  */
 
 (function () {
   'use strict';
 
-  if (window.__GSC_DOWNLOADER_V220_INITIALIZED__) return;
-  window.__GSC_DOWNLOADER_V220_INITIALIZED__ = true;
+  if (window.__GSC_DOWNLOADER_V300_INITIALIZED__) return;
+  window.__GSC_DOWNLOADER_V300_INITIALIZED__ = true;
 
   let isBatchRunning = false;
   let cancelBatchRequested = false;
@@ -135,20 +136,61 @@
 
   function isBackButtonVisible() {
     const backBtns = Array.from(document.querySelectorAll(
-      'button[aria-label="Back" i], [role="button"][aria-label="Back" i], button[title="Back" i], [role="button"][data-tooltip="Back" i]'
-    )).filter((el) => isElementVisible(el) && !el.closest('#gsc-downloader-floating-root'));
+      'button, [role="button"], a[role="button"]'
+    )).filter((el) => {
+      if (!isElementVisible(el)) return false;
+      if (el.closest('#gsc-downloader-floating-root')) return false;
+      const aria = (
+        el.getAttribute('aria-label') ||
+        el.getAttribute('data-tooltip') ||
+        el.getAttribute('title') ||
+        ''
+      ).toLowerCase();
+      const txt = getCleanElementText(el).toLowerCase();
+      if (
+        /^(back|atr[aá]s|volver|retour|zur[uü]ck|indietro|voltar|назад)$/i.test(aria) ||
+        /^(back|atr[aá]s|volver|retour|zur[uü]ck|indietro|voltar|назад)$/i.test(txt) ||
+        aria.includes('back') ||
+        aria.includes('atrás') ||
+        aria.includes('volver')
+      ) {
+        return true;
+      }
+      if (el.querySelector('[data-icon*="arrow_back"], [data-icon*="arrow-back"], [aria-label*="back" i], [aria-label*="atr[aá]s" i]')) {
+        return true;
+      }
+      return false;
+    });
     return backBtns.length > 0 ? backBtns[0] : null;
   }
 
   function isCloseButtonVisible() {
     const closeBtns = Array.from(document.querySelectorAll(
-      'button[aria-label*="close" i], [role="button"][aria-label*="close" i], button[title*="close" i], [data-tooltip*="close" i]'
+      'button, [role="button"], a[role="button"]'
     )).filter((el) => {
       if (!isElementVisible(el)) return false;
       if (el.closest('#gsc-downloader-floating-root')) return false;
       const rect = el.getBoundingClientRect();
       if (rect.width > 120 || rect.height > 120) return false;
-      return true;
+      const aria = (
+        el.getAttribute('aria-label') ||
+        el.getAttribute('data-tooltip') ||
+        el.getAttribute('title') ||
+        ''
+      ).toLowerCase();
+      const txt = getCleanElementText(el).toLowerCase();
+      if (
+        /^(close|cerrar|fermer|schlie[sß]en|chiudi|fechar|закрыть)$/i.test(aria) ||
+        /^(close|cerrar|fermer|schlie[sß]en|chiudi|fechar|закрыть)$/i.test(txt) ||
+        aria.includes('close') ||
+        aria.includes('cerrar')
+      ) {
+        return true;
+      }
+      if (el.querySelector('[data-icon*="close"], [aria-label*="close" i], [aria-label*="cerrar" i]')) {
+        return true;
+      }
+      return false;
     });
     return closeBtns.length > 0 ? closeBtns[0] : null;
   }
@@ -169,7 +211,7 @@
     if (url.includes('/settings/crawl-stats')) {
       reportType = 'crawl-stats';
       reportName = 'Crawl Stats';
-      // In Crawl Stats, clicking a breakdown row shows a Back button or flyout drawer Close button
+      // In Crawl Stats, clicking a breakdown or host row shows a Back button or flyout drawer Close button
       const backBtn = isBackButtonVisible();
       const closeBtn = isCloseButtonVisible();
       if (
@@ -177,7 +219,9 @@
         url.includes('file_type=') ||
         url.includes('purpose=') ||
         url.includes('bot_type=') ||
-        ((backBtn || closeBtn) && pageTitle && !/crawl stats/i.test(pageTitle))
+        url.includes('host=') ||
+        url.includes('host_status=') ||
+        ((backBtn || closeBtn) && pageTitle && !/(crawl stats|estad[ií]sticas de rastreo)/i.test(pageTitle))
       ) {
         isDrilldown = true;
         subView = pageTitle || 'Breakdown Drilldown';
@@ -247,10 +291,17 @@
 
       if (
         aria === 'export' ||
+        aria === 'exportar' ||
         aria.includes('export') ||
+        aria.includes('exportar') ||
         cleanTxt === 'export' ||
+        cleanTxt === 'exportar' ||
         rawTxt === 'export' ||
-        rawTxt.endsWith('export')
+        rawTxt === 'exportar' ||
+        rawTxt.endsWith('export') ||
+        rawTxt.endsWith('exportar') ||
+        /^(export|exportar|exporter|exportieren|esporta|экспорт)$/i.test(cleanTxt) ||
+        /^(export|exportar|exporter|exportieren|esporta|экспорт)$/i.test(aria)
       ) {
         return btn;
       }
@@ -453,13 +504,17 @@
       if (
         !exportBtn &&
         excludeBtn &&
-        attempt >= 12 &&
+        attempt >= 10 &&
         (isBackButtonVisible() || isCloseButtonVisible()) &&
         findCrawlStatsBreakdownHeadings().length === 0
       ) {
         exportBtn = findVisibleExportButton(null);
       }
       if (exportBtn) break;
+      // If view has stabilized with Back/Close button and no export button after 3 seconds, stop waiting
+      if (!exportBtn && attempt >= 15 && (isBackButtonVisible() || isCloseButtonVisible())) {
+        break;
+      }
       await sleep(200);
     }
 
@@ -555,18 +610,53 @@
   // --- DISCOVERING SUB-REPORTS & DRILLDOWN ROWS ---
 
   /**
-   * The 4 standard Crawl Stats breakdown tables in Google Search Console:
-   * 1. By response
-   * 2. By file type
-   * 3. By purpose
-   * 4. By Googlebot type (or By Googlebot)
+   * The Crawl Stats breakdown tables & sections in Google Search Console:
+   * 1. By response (Por respuesta)
+   * 2. By file type (Por tipo de archivo)
+   * 3. By purpose (Por finalidad / Por propósito)
+   * 4. By Googlebot type (Por tipo de Googlebot / Por Googlebot)
+   * 5. Host status (Estado del host: Robots.txt fetch, DNS resolution, Server connectivity)
+   * 6. Hosts table (Hosts / Servidores)
    */
   const CRAWL_STATS_BREAKDOWNS = [
-    { id: 'by-response', section: 'By response', regex: /(?:crawl requests:?\s*)?(?:by\s+)?response(s)?/i },
-    { id: 'by-file-type', section: 'By file type', regex: /(?:crawl requests:?\s*)?(?:by\s+)?file\s+type(s)?/i },
-    { id: 'by-purpose', section: 'By purpose', regex: /(?:crawl requests:?\s*)?(?:by\s+)?purpose/i },
-    { id: 'by-googlebot', section: 'By Googlebot type', regex: /(?:crawl requests:?\s*)?(?:by\s+)?googlebot(\s+type)?/i }
+    {
+      id: 'by-response',
+      section: 'By response',
+      regex: /(?:crawl requests:?\s*)?(?:by\s+|por\s+)?(?:responses?|respuestas?)/i
+    },
+    {
+      id: 'by-file-type',
+      section: 'By file type',
+      regex: /(?:crawl requests:?\s*)?(?:by\s+|por\s+)?(?:file\s+types?|tipos?\s+de\s+archivo)/i
+    },
+    {
+      id: 'by-purpose',
+      section: 'By purpose',
+      regex: /(?:crawl requests:?\s*)?(?:by\s+|por\s+)?(?:purpose|finalidad|prop[oó]sito)/i
+    },
+    {
+      id: 'by-googlebot',
+      section: 'By Googlebot type',
+      regex: /(?:crawl requests:?\s*)?(?:by\s+|por\s+)?(?:googlebot(\s+type)?|tipos?\s+de\s+googlebot)/i
+    },
+    {
+      id: 'host-status',
+      section: 'Host status',
+      regex: /(?:host\s+status|estado\s+del\s+host|statut\s+de\s+l'h[oô]te|host-status)/i
+    },
+    {
+      id: 'hosts',
+      section: 'Hosts',
+      regex: /^(?:hosts|hosts\s+table|tabla\s+de\s+hosts|servidores|anfitriones)$/i
+    }
   ];
+
+  /**
+   * Universal regular expressions to detect pagination range indicators and controls
+   * across all Google Search Console languages (e.g. "1–10 of 42", "1–10 de 42", "Filas por página").
+   */
+  const PAGINATION_RANGE_REGEX = /\b\d+\s*[-–]\s*\d+\s*(?:of|de|von|d'|sur|из|\/)\s*\d+\b/i;
+  const PAGINATION_LABEL_REGEX = /(?:rows|filas|lignes|zeilen|righe|linhas|строк)\s*(?:per|por|pro|par|na|de)?\s*(?:page|p[aá]gina|seite|страниц[еу])?/i;
 
   /**
    * Signature pattern matching for Crawl Stats rows to accurately categorize them
@@ -575,36 +665,55 @@
   function detectCrawlStatsSectionBySignature(text) {
     if (!text || typeof text !== 'string') return null;
     const clean = text.trim();
+
+    // Host status check (Robots.txt fetch, DNS resolution, Server connectivity)
+    if (
+      /(robots\.txt|dns|resoluci[oó]n|conectividad|connectivity|recuperaci[oó]n)/i.test(clean)
+    ) {
+      return 'Host status';
+    }
+
+    // Hosts check (domain / hostname format: e.g. www.reuse.mx, example.com)
+    if (
+      /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/i.test(clean)
+    ) {
+      return 'Hosts';
+    }
+
     // HTTP status codes or status strings: 200, 301, 302, 304, 404, 500, etc.
     if (
       /\b(200|301|302|304|307|308|400|401|403|404|410|429|500|502|503|504)\b/.test(clean) ||
-      /^(OK|Moved permanently|Temporary redirect|Redirect|Not found|Server error|Blocked|Other client error)\s*\(/i.test(clean)
+      /^(OK|Correcto|Moved permanently|Temporary redirect|Redirect|Redirecci[oó]n|Not found|No encontrado|Server error|Error del servidor|Blocked|Bloqueado|Other client error|Otro error de cliente)\b/i.test(clean)
     ) {
       return 'By response';
     }
+
     // File types
     if (
-      /^(HTML|Image|JavaScript|CSS|JSON|PDF|Video|Audio|XML|Font|Other file type|Syndication)$/i.test(clean) ||
+      /^(HTML|Image|Imagen|Imágenes|JavaScript|CSS|JSON|PDF|Video|Audio|XML|Font|Fuente|Other file type|Otro tipo de archivo|Syndication)$/i.test(clean) ||
       /\b(HTML|Image|JavaScript|CSS|JSON|PDF|Video|Audio)\b/i.test(clean)
     ) {
       return 'By file type';
     }
+
     // Purpose
-    if (/^(Refresh|Discovery)$/i.test(clean)) {
+    if (/^(Refresh|Discovery|Actualizaci[oó]n|Descubrimiento)$/i.test(clean)) {
       return 'By purpose';
     }
+
     // Googlebot types
     if (
       /googlebot/i.test(clean) ||
-      /^(Smartphone|Desktop|Page resource load|AdsBot|StoreBot|Feedfetcher)$/i.test(clean)
+      /^(Smartphone|Desktop|Ordenador|Page resource load|Carga de recursos de p[aá]gina|AdsBot|StoreBot|Feedfetcher)$/i.test(clean)
     ) {
       return 'By Googlebot type';
     }
+
     return null;
   }
 
   /**
-   * Finds the visible heading elements for each of the 4 Crawl Stats breakdowns on the page.
+   * Finds the visible heading elements for each of the Crawl Stats breakdowns & sections on the page.
    */
   function findCrawlStatsBreakdownHeadings() {
     const candidates = Array.from(
@@ -632,8 +741,9 @@
   }
 
   /**
-   * Isolates the DOM container(s) belonging specifically to a single Crawl Stats breakdown card
-   * so rows from "By response", "By file type", "By purpose", and "By Googlebot type" are cleanly separated.
+   * Isolates the DOM container(s) belonging specifically to a single Crawl Stats section card
+   * so rows from "By response", "By file type", "By purpose", "By Googlebot type", "Host status", etc.
+   * are cleanly separated.
    */
   function getBreakdownCardScopeElements(item, allHeadings) {
     const otherHeadingEls = allHeadings
@@ -644,10 +754,6 @@
     while (cardRoot.parentElement && cardRoot.parentElement !== document.body) {
       const parent = cardRoot.parentElement;
       if (otherHeadingEls.some((otherEl) => parent.contains(otherEl))) {
-        break;
-      }
-      const parentText = getCleanElementText(parent);
-      if (/host status/i.test(parentText) && !/host status/i.test(getCleanElementText(cardRoot))) {
         break;
       }
       cardRoot = parent;
@@ -705,27 +811,39 @@
       label = nonEmptyCells[0].text;
       count = nonEmptyCells[nonEmptyCells.length - 1].text;
       firstCell = nonEmptyCells[0].el;
+    } else if (nonEmptyCells.length === 1) {
+      const singleText = nonEmptyCells[0].text;
+      const match = singleText.match(/^(.+?)\s+(\d[\d,.]*%?)$/);
+      if (match) {
+        label = match[1].trim();
+        count = match[2].trim();
+      } else {
+        label = singleText.trim();
+        count = '';
+      }
+      firstCell = nonEmptyCells[0].el;
     } else {
-      const fullText = nonEmptyCells.length === 1 ? nonEmptyCells[0].text : getCleanElementText(row);
+      const fullText = getCleanElementText(row);
       const match = fullText.match(/^(.+?)\s+(\d[\d,.]*%?)$/);
-      if (!match) return null;
-      label = match[1].trim();
-      count = match[2].trim();
-      firstCell = nonEmptyCells.length === 1 ? nonEmptyCells[0].el : row;
+      if (match) {
+        label = match[1].trim();
+        count = match[2].trim();
+      } else if (fullText.length >= 3) {
+        label = fullText.trim();
+        count = '';
+      } else {
+        return null;
+      }
+      firstCell = row;
     }
 
     if (!label || label.length > 140) return null;
 
     // Skip table header labels, breakdown titles, or pagination controls
-    if (/^(reason|response|file type|purpose|googlebot(\s+type)?|metric|status|url|rows per page|by response|by file type|by purpose|by googlebot(\s+type)?)$/i.test(label)) {
+    if (/^(reason|motivo|response|respuesta|file type|tipo de archivo|purpose|finalidad|googlebot(\s+type)?|tipo de googlebot|metric|m[eé]trica|status|estado|url|rows per page|filas por p[aá]gina|by response|by file type|by purpose|by googlebot(\s+type)?|por respuesta|por tipo de archivo|por finalidad|por tipo de googlebot)$/i.test(label)) {
       return null;
     }
-    if (/rows per page/i.test(label) || /^\d+\s*[-–]\s*\d+\s+of\s+\d+/i.test(label)) {
-      return null;
-    }
-
-    // Skip Crawl Stats Host Status rows (Robots.txt fetch, DNS resolution, Server connectivity)
-    if (/^(robots\.txt fetch|dns resolution|server connectivity)$/i.test(label)) {
+    if (PAGINATION_RANGE_REGEX.test(label) || PAGINATION_LABEL_REGEX.test(label)) {
       return null;
     }
 
@@ -755,8 +873,8 @@
   }
 
   /**
-   * Discovers all clickable breakdown rows across all 4 Crawl Stats breakdowns:
-   * By response, By file type, By purpose, and By Googlebot type.
+   * Discovers all clickable breakdown and section rows across Crawl Stats:
+   * By response, By file type, By purpose, By Googlebot type, Host status, and Hosts.
    */
   function findCrawlStatsBreakdownRows() {
     const headings = findCrawlStatsBreakdownHeadings();
@@ -853,7 +971,6 @@
       const txt = getCleanElementText(btn);
       const aria = (btn.getAttribute('aria-label') || '').toLowerCase();
       if (/^open report$/i.test(txt) || aria.includes('open report')) {
-        // Determine whether this button belongs to the Mobile or Desktop card
         const card = btn.closest('section, [role="region"], c-wiz > div div, .card') || btn.parentElement?.parentElement;
         const cardText = card ? getCleanElementText(card) : '';
         let device = 'Device';
@@ -899,106 +1016,244 @@
     return null;
   }
 
-  /**
-   * Expands a table inside a given breakdown card to 25 rows per page if a pagination selector exists.
-   */
-  async function setRowsPerPageForScope(scope, targetCount = '25') {
-    if (!scope || !isElementVisible(scope)) return false;
+  // --- UNIVERSAL MULTILINGUAL PAGINATION EXPANSION (25 ROWS PER PAGE) ---
 
-    // 1. Check native <select>
-    const selectEl = scope.querySelector('select');
+  /**
+   * Finds all pagination container elements across the current page.
+   * Matches numeric range text (e.g. "1–10 of 42", "1–10 de 42") and localized labels.
+   */
+  function findAllPaginationBlocks() {
+    const blocks = [];
+    const seenElements = new Set();
+
+    // 1. Find elements matching range pattern (e.g. "1–10 of 42" or "1–10 de 42")
+    const allTextNodes = Array.from(document.querySelectorAll('span, div, p, label, footer, [role="toolbar"]'))
+      .filter((el) => {
+        if (!isElementVisible(el)) return false;
+        if (el.closest('#gsc-downloader-floating-root')) return false;
+        const txt = getCleanElementText(el);
+        return txt.length < 50 && PAGINATION_RANGE_REGEX.test(txt);
+      });
+
+    // Keep only the innermost matching elements
+    const innermostRanges = allTextNodes.filter((el) =>
+      !allTextNodes.some((other) => other !== el && el.contains(other))
+    );
+
+    for (const rangeEl of innermostRanges) {
+      let container = rangeEl.closest('footer, [role="toolbar"], div[jscontroller], div[jsmodel]') || rangeEl.parentElement;
+      while (container && container.parentElement && container.parentElement !== document.body) {
+        if (container.querySelector('tbody, table, [role="grid"], [role="table"]')) {
+          break;
+        }
+        if (container.parentElement.querySelector('tbody, table, [role="grid"], [role="table"]')) {
+          break;
+        }
+        container = container.parentElement;
+      }
+
+      if (container && !seenElements.has(container)) {
+        seenElements.add(container);
+        blocks.push(container);
+      }
+    }
+
+    // 2. Also check for localized "rows per page" text elements whose containers weren't captured
+    const labelNodes = Array.from(document.querySelectorAll('span, div, p, label'))
+      .filter((el) => {
+        if (!isElementVisible(el)) return false;
+        if (el.closest('#gsc-downloader-floating-root')) return false;
+        const txt = getCleanElementText(el);
+        return txt.length < 40 && PAGINATION_LABEL_REGEX.test(txt);
+      });
+
+    for (const lbl of labelNodes) {
+      const container = lbl.closest('footer, [role="toolbar"], div') || lbl.parentElement;
+      if (container && !seenElements.has(container) && !blocks.some((b) => b.contains(container) || container.contains(b))) {
+        seenElements.add(container);
+        blocks.push(container);
+      }
+    }
+
+    return blocks;
+  }
+
+  /**
+   * Finds the dropdown combobox/trigger inside a pagination block.
+   */
+  function findDropdownTriggerInPaginationBlock(block) {
+    if (!block || !isElementVisible(block)) return null;
+
+    // 1. Native <select> element
+    const selectEl = block.querySelector('select');
     if (selectEl && isElementVisible(selectEl)) {
+      return { type: 'select', element: selectEl };
+    }
+
+    // 2. Dropdown combobox / button controls
+    const triggerSelectors = [
+      '[role="combobox"]',
+      '[aria-haspopup="listbox"]',
+      '[aria-haspopup="true"]',
+      '[aria-expanded]',
+      '.VfPpkd-O12Habb',
+      '.VfPpkd-T0kwAb',
+      '[jsaction*="dropdown"]',
+      '[jsaction*="select"]',
+      '[aria-label*="row" i]',
+      '[aria-label*="fila" i]',
+      '[aria-label*="page" i]',
+      '[aria-label*="página" i]',
+      '[aria-label*="per page" i]',
+      '[aria-label*="por página" i]'
+    ];
+
+    const candidates = Array.from(block.querySelectorAll(triggerSelectors.join(',')))
+      .filter((el) => isElementVisible(el) && !el.closest('#gsc-downloader-floating-root'));
+
+    if (candidates.length > 0) {
+      return { type: 'custom', element: candidates[0] };
+    }
+
+    // 3. Look for any button/div displaying current page size numbers ("5", "10", "20", "25", "50", "100")
+    const allClickable = Array.from(block.querySelectorAll('button, [role="button"], div[tabindex="0"], div[jsaction], span[tabindex="0"]'))
+      .filter((el) => isElementVisible(el) && !el.closest('#gsc-downloader-floating-root'));
+
+    for (const el of allClickable) {
+      const txt = getCleanElementText(el);
+      if (/^(5|10|20|25|50|100)$/.test(txt) || /^(5|10|20|25|50|100)\s*(rows|filas)?$/i.test(txt)) {
+        return { type: 'custom', element: el };
+      }
+    }
+
+    // 4. Sibling search relative to "Rows per page" or "Filas por página" text node
+    const textEls = Array.from(block.querySelectorAll('span, div, p, label'))
+      .filter((el) => isElementVisible(el) && PAGINATION_LABEL_REGEX.test(getCleanElementText(el)));
+
+    for (const txtEl of textEls) {
+      let sib = txtEl.nextElementSibling;
+      while (sib) {
+        if (isElementVisible(sib)) {
+          const innerTrigger = sib.querySelector('button, [role="combobox"], [role="button"], div[jsaction]') || sib;
+          return { type: 'custom', element: innerTrigger };
+        }
+        sib = sib.nextElementSibling;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Expands a single pagination block to 25 rows per page.
+   */
+  async function expandPaginationBlockTo25(block) {
+    const triggerInfo = findDropdownTriggerInPaginationBlock(block);
+    if (!triggerInfo) return false;
+
+    if (triggerInfo.type === 'select') {
+      const selectEl = triggerInfo.element;
       const opt = Array.from(selectEl.options).find(
-        (o) => o.value === targetCount || o.text.trim() === targetCount || new RegExp(`^${targetCount}\\b`).test(o.text.trim())
+        (o) => o.value === '25' || o.text.trim() === '25' || /^25\b/.test(o.text.trim())
       );
       if (opt && selectEl.value !== opt.value) {
         selectEl.value = opt.value;
         selectEl.dispatchEvent(new Event('change', { bubbles: true }));
-        await sleep(500);
+        await sleep(650);
         return true;
       }
       return false;
     }
 
-    // 2. Look for pagination dropdown triggers inside scope
-    const triggerCandidates = Array.from(scope.querySelectorAll(
-      '[aria-label*="rows per page" i], [aria-label*="row" i][aria-haspopup], [role="combobox"], [aria-haspopup="listbox"], .VfPpkd-O12Habb, div[jsaction*="dropdown"], div[jsaction*="select"]'
-    )).filter((el) => isElementVisible(el) && !el.closest('#gsc-downloader-floating-root'));
+    const trigger = triggerInfo.element;
+    const curText = getCleanElementText(trigger);
 
-    // 2b. If not found by selector, find text "Rows per page" and look at its sibling/parent controls
-    if (triggerCandidates.length === 0) {
-      const textEls = Array.from(scope.querySelectorAll('span, div, p, label'))
-        .filter((el) => isElementVisible(el));
-      const rppEl = textEls.find((el) => /rows per page/i.test(getCleanElementText(el)));
-      if (rppEl) {
-        const parent = rppEl.closest('footer, [role="toolbar"], div') || rppEl.parentElement;
-        if (parent) {
-          const subTriggers = Array.from(parent.querySelectorAll(
-            '[role="button"], button, [role="combobox"], [aria-haspopup], div[tabindex="0"]'
-          )).filter((el) => isElementVisible(el) && !el.contains(rppEl) && el !== rppEl);
-          triggerCandidates.push(...subTriggers);
-        }
-      }
-    }
-
-    if (triggerCandidates.length === 0) return false;
-
-    const trigger = triggerCandidates[0];
-    const triggerText = getCleanElementText(trigger);
-
-    // If already displaying 25, return true
-    if (triggerText === targetCount || new RegExp(`^${targetCount}\\b`).test(triggerText)) {
+    // If already showing "25", no expansion needed
+    if (curText === '25' || /^25\b/.test(curText)) {
       return true;
     }
 
-    // Click the combobox to open the dropdown menu
-    dispatchRealClick(trigger);
-    await sleep(400);
+    trigger.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    await sleep(100);
 
-    // Find the option for "25" across document
-    const optionCandidates = Array.from(document.querySelectorAll(
-      '[role="option"], [role="menuitem"], .VfPpkd-Listitem, [data-value="25"], li, div[jsaction*="click"], span'
-    )).filter((el) => isElementVisible(el) && !el.closest('#gsc-downloader-floating-root'));
+    // Click the trigger to open the dropdown menu
+    dispatchRealClick(trigger);
+    try { trigger.click(); } catch (e) {}
+
+    // Dispatch ArrowDown / Enter on the trigger to ensure Closure / Wiz opens the listbox
+    const downOpts = { key: 'ArrowDown', code: 'ArrowDown', keyCode: 40, which: 40, bubbles: true, cancelable: true };
+    trigger.dispatchEvent(new KeyboardEvent('keydown', downOpts));
+    trigger.dispatchEvent(new KeyboardEvent('keyup', downOpts));
+
+    await sleep(350);
+
+    // Look for the "25" option across the entire document (menus are appended to body)
+    const optionSelectors = [
+      '[role="option"]',
+      '[role="menuitem"]',
+      '.VfPpkd-Listitem',
+      '.VfPpkd-A9uggb-menu-item',
+      '[data-value="25"]',
+      'li',
+      'div[jsaction*="click"]',
+      'span'
+    ];
+
+    const optionCandidates = Array.from(document.querySelectorAll(optionSelectors.join(',')))
+      .filter((el) => isMenuElementVisible(el) && !el.closest('#gsc-downloader-floating-root'));
 
     const opt25 = optionCandidates.find((el) => {
-      const txt = getCleanElementText(el);
       const val = el.getAttribute('data-value') || '';
-      return txt === targetCount || val === targetCount || new RegExp(`^${targetCount}(\\s|$)`).test(txt);
+      const txt = getCleanElementText(el);
+      return val === '25' || txt === '25' || /^25(\s|$)/.test(txt);
     });
 
     if (opt25) {
       dispatchRealClick(opt25);
+      try { opt25.click(); } catch (e) {}
       await sleep(650);
       return true;
     } else {
-      // Close the menu if option was not found
+      // Close open dropdown with Escape
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
-      await sleep(200);
+      await sleep(150);
     }
 
     return false;
   }
 
   /**
-   * Expands each of the four Crawl Stats breakdown cards to 25 rows per page.
+   * Expands every pagination control found on the page to 25 rows per page.
+   * Universal and language-agnostic (works in English, Spanish, French, German, etc.).
    */
   async function expandAllCrawlStatsBreakdownsTo25() {
-    const headings = findCrawlStatsBreakdownHeadings();
-    if (headings.length === 0) return false;
+    let blocks = findAllPaginationBlocks();
+    if (blocks.length === 0) {
+      const headings = findCrawlStatsBreakdownHeadings();
+      for (const item of headings) {
+        const scopes = getBreakdownCardScopeElements(item, headings);
+        for (const scope of scopes) {
+          const subBlocks = Array.from(scope.querySelectorAll('footer, [role="toolbar"], div'))
+            .filter((el) => isElementVisible(el) && (PAGINATION_RANGE_REGEX.test(getCleanElementText(el)) || PAGINATION_LABEL_REGEX.test(getCleanElementText(el))));
+          blocks.push(...subBlocks);
+        }
+      }
+    }
+
+    if (blocks.length === 0) return false;
 
     let anyChanged = false;
-    for (const item of headings) {
-      const scopes = getBreakdownCardScopeElements(item, headings);
-      for (const scope of scopes) {
-        try {
-          const changed = await setRowsPerPageForScope(scope, '25');
-          if (changed) anyChanged = true;
-        } catch (e) {}
+    for (const block of blocks) {
+      try {
+        const changed = await expandPaginationBlockTo25(block);
+        if (changed) anyChanged = true;
+      } catch (e) {
+        console.warn('GSC non-API Downloader: Error expanding pagination block', e);
       }
     }
 
     if (anyChanged) {
-      await sleep(500);
+      await sleep(600);
     }
     return anyChanged;
   }
@@ -1006,25 +1261,27 @@
   /**
    * Finds all clickable drilldown rows in tables on the current Overview page:
    * - Page Indexing: "Why pages aren't indexed", "Improve page experience"
-   * - Crawl Stats: "By response", "By file type", "By purpose", "By Googlebot type"
+   * - Crawl Stats: "By response", "By file type", "By purpose", "By Googlebot type", "Host status", "Hosts", etc.
    * - Core Web Vitals (Mobile/Desktop): "Why URLs aren't considered good"
    */
   function findClickableTableRows(reportInfo) {
-    // Do not treat example URL lists inside a single drilldown as sub-report drilldowns
     if (reportInfo.isDrilldown) return [];
 
     const discoveredRows = [];
     const seenKeys = new Set();
 
-    // On Crawl Stats, strictly use the 4-breakdown scanner (By response, By file type, By purpose, By Googlebot type)
+    // 1. On Crawl Stats, first discover rows under all known Crawl Stats headings (Breakdowns, Host status, Hosts)
     if (reportInfo.reportType === 'crawl-stats') {
-      const VALID_CRAWL_BREAKDOWNS = ['By response', 'By file type', 'By purpose', 'By Googlebot type'];
-      return findCrawlStatsBreakdownRows().filter((r) =>
-        VALID_CRAWL_BREAKDOWNS.includes(r.section)
-      );
+      const breakdownRows = findCrawlStatsBreakdownRows();
+      breakdownRows.forEach((r) => {
+        if (!seenKeys.has(r.key)) {
+          seenKeys.add(r.key);
+          discoveredRows.push(r);
+        }
+      });
     }
 
-    // Query document directly (filtered by isElementVisible) so nested <c-wiz> cards are never missed
+    // 2. Discover any additional table rows on the current page
     const rowElements = Array.from(document.querySelectorAll('tbody tr, tr[role="row"], [role="row"]'))
       .filter((row) => {
         if (!isElementVisible(row)) return false;
@@ -1035,7 +1292,6 @@
       });
 
     rowElements.forEach((row) => {
-      // Skip if this DOM row was already captured by findCrawlStatsBreakdownRows
       if (discoveredRows.some((d) => d.rowElement === row || d.rowElement.contains(row) || row.contains(d.rowElement))) {
         return;
       }
@@ -1050,25 +1306,22 @@
         .map((el) => ({ el, text: getCleanElementText(el) }))
         .filter((item) => item.text.length > 0);
 
-      if (nonEmptyCells.length < 2) return;
+      if (nonEmptyCells.length === 0) return;
 
       const firstCellText = nonEmptyCells[0].text;
-      const lastCellText = nonEmptyCells[nonEmptyCells.length - 1].text;
+      const lastCellText = nonEmptyCells.length > 1 ? nonEmptyCells[nonEmptyCells.length - 1].text : '';
 
       if (!firstCellText || firstCellText.length > 140) return;
 
       // Skip table header labels or pagination rows
-      if (/^(reason|response|file type|purpose|googlebot(\s+type)?|metric|status|url|rows per page)$/i.test(firstCellText)) {
+      if (/^(reason|motivo|response|respuesta|file type|tipo de archivo|purpose|finalidad|googlebot(\s+type)?|tipo de googlebot|metric|m[eé]trica|status|estado|url|rows per page|filas por p[aá]gina)$/i.test(firstCellText)) {
+        return;
+      }
+      if (PAGINATION_RANGE_REGEX.test(firstCellText) || PAGINATION_LABEL_REGEX.test(firstCellText)) {
         return;
       }
 
-      // Skip Crawl Stats Host Status rows (Robots.txt fetch, DNS resolution, Server connectivity)
-      // because Host Status sub-views do not have an Export button in GSC.
-      if (/^(robots\.txt fetch|dns resolution|server connectivity)$/i.test(firstCellText)) {
-        return;
-      }
-
-      // Determine which table/section this row belongs to
+      // Determine which section this row belongs to
       let sectionTitle = '';
       const tableContainer = row.closest('table, [role="table"], [role="grid"]') || row.parentElement;
       if (tableContainer) {
@@ -1198,14 +1451,9 @@
         });
       }
 
-      // Strictly include ONLY rows belonging to the four crawl request breakdown categories:
-      // (Total exports strictly equals: sum of all 4 breakdown rows + 1)
-      const VALID_CRAWL_BREAKDOWNS = ['By response', 'By file type', 'By purpose', 'By Googlebot type'];
-      const breakdownRows = findCrawlStatsBreakdownRows().filter((r) =>
-        VALID_CRAWL_BREAKDOWNS.includes(r.section)
-      );
-
-      breakdownRows.forEach((r) => {
+      // Include all discovered options & breakdown rows on the page (breakdowns, Host status, Hosts, etc.)
+      const rows = findClickableTableRows(reportInfo);
+      rows.forEach((r) => {
         tasks.push({
           id: `row::${r.key}`,
           type: 'table-row',
@@ -1923,7 +2171,7 @@
       const action = request.action;
 
       if (action === 'PING') {
-        const ver = (isExtensionValid() && chrome.runtime?.getManifest) ? chrome.runtime.getManifest().version : '2.2.0';
+        const ver = (isExtensionValid() && chrome.runtime?.getManifest) ? chrome.runtime.getManifest().version : '3.0.0';
         sendResponse({ pong: true, version: ver });
         return true;
       }

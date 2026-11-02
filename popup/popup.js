@@ -1,5 +1,5 @@
 /**
- * GSC non-API Data Downloader - Popup Controller (v2.0.0)
+ * GSC non-API Data Downloader - Popup Controller (v3.0.0)
  * Controls native report & drilldown export selection and format preferences.
  */
 
