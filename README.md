@@ -105,6 +105,16 @@ GSC-nonAPI-DataDownloader/
 
 ---
 
+## 🏷️ Versioning Strategy
+
+This project follows a strict three-tier versioning system (`MAJOR.MINOR.PATCH`):
+
+* **Patch / 3rd digit (e.g., `1.0.0` → `1.0.1`):** Applied for **cosmetic changes** — the smallest modifications such as styling adjustments, typography/color tweaks, wording fixes, or setting/menu arrangement changes.
+* **Medium / 2nd digit (e.g., `1.0.0` → `1.1.0`):** Applied for **medium changes** — introducing new capabilities, new filters, new export formats, or feature additions without rewriting core architecture.
+* **Major / 1st digit (e.g., `1.0.0` → `2.0.0`):** Applied for **major changes** — fundamental code rework, major architectural refactoring, or introducing entirely new core feature suites.
+
+---
+
 ## 🔒 Security & Privacy
 
 * **Zero external dependencies**: Built in pure vanilla JavaScript without external npm packages or CDNs.

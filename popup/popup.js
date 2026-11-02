@@ -23,9 +23,15 @@ document.addEventListener('DOMContentLoaded', async () => {
   const jumpCrawlStats = document.getElementById('jumpCrawlStats');
   const jumpCwv = document.getElementById('jumpCwv');
   const toggleFloatingBtn = document.getElementById('toggleFloatingBtn');
+  const appVersion = document.getElementById('appVersion');
 
   const progressOverlay = document.getElementById('progressOverlay');
   const progressMessage = document.getElementById('progressMessage');
+
+  // Display version dynamically from manifest
+  if (appVersion && chrome.runtime?.getManifest) {
+    appVersion.textContent = 'v' + chrome.runtime.getManifest().version;
+  }
 
   let activeTab = null;
   let activeResourceId = '';
