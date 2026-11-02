@@ -42,8 +42,6 @@ async function ensureContentScriptInjected(tabId) {
 function sanitizeSegment(str, maxLen = 45) {
   if (!str) return '';
   return String(str)
-    .replace(/https?:\/\//gi, '')
-    .replace(/sc-domain:/gi, '')
     .replace(/[^a-zA-Z0-9_\-\.]+/g, '_')
     .replace(/^_+|_+$/g, '')
     .replace(/_+/g, '_')
@@ -61,7 +59,7 @@ if (chrome.downloads && chrome.downloads.onCreated) {
   });
 }
 
-// Rename and organize GSC exported files into a clean folder structure
+// Rename and organize GSC exported files into a clean folder structure (property-agnostic)
 if (chrome.downloads && chrome.downloads.onDeterminingFilename) {
   chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
     const now = Date.now();
@@ -76,7 +74,6 @@ if (chrome.downloads && chrome.downloads.onDeterminingFilename) {
       const ext = extMatch ? extMatch[1] : (meta.format === 'csv' ? '.zip' : '.xlsx');
 
       const dateStr = new Date().toISOString().slice(0, 10);
-      const propSlug = sanitizeSegment(meta.property || 'GSC_Property', 35);
       const reportSlug = sanitizeSegment(meta.reportName || 'Report', 25);
       const sectionSlug = sanitizeSegment(meta.section || '', 25);
       const itemSlug = sanitizeSegment(meta.label || 'Export', 45);
@@ -92,7 +89,7 @@ if (chrome.downloads && chrome.downloads.onDeterminingFilename) {
 
       const finalFileName = `${idxPrefix}${nameParts.join('__')}${ext}`;
       const fullPath = meta.organizeSubfolder !== false
-        ? `GSC-Exports/${propSlug}_${dateStr}/${finalFileName}`
+        ? `GSC-Exports/${dateStr}/${finalFileName}`
         : finalFileName;
 
       suggest({

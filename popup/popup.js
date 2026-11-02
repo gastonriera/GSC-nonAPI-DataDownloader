@@ -6,7 +6,6 @@
 document.addEventListener('DOMContentLoaded', async () => {
   const statusPill = document.getElementById('statusPill');
   const statusText = document.getElementById('statusText');
-  const propertyValue = document.getElementById('propertyValue');
   const reportViewValue = document.getElementById('reportViewValue');
   const fmtExcel = document.getElementById('fmtExcel');
   const fmtCsv = document.getElementById('fmtCsv');
@@ -27,7 +26,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   const appVersion = document.getElementById('appVersion');
 
   let activeTab = null;
-  let activeResourceId = '';
   let selectedFormat = 'excel';
   let discoveredTasks = [];
 
@@ -75,11 +73,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   try {
-    const urlObj = new URL(activeTab.url);
-    activeResourceId = urlObj.searchParams.get('resource_id') || '';
-  } catch (e) {}
-
-  try {
     await chrome.runtime.sendMessage({ action: 'ENSURE_INJECTED', tabId: activeTab.id });
   } catch (e) {}
 
@@ -120,12 +113,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     const { reportInfo, tasks, nativeExportAvailable } = data;
     discoveredTasks = tasks || [];
 
-    if (reportInfo.property) {
-      activeResourceId = reportInfo.property;
-    }
-
-    propertyValue.textContent = reportInfo.property || 'Active Property';
-    propertyValue.title = reportInfo.property || '';
     reportViewValue.textContent = `${reportInfo.reportName} (${reportInfo.subView || 'Overview'})`;
 
     statusPill.className = 'status-pill status-active';
@@ -168,18 +155,16 @@ document.addEventListener('DOMContentLoaded', async () => {
   function renderFallbackState() {
     statusPill.className = 'status-pill status-warning';
     statusText.textContent = 'GSC Detected';
-    propertyValue.textContent = activeResourceId || 'Active Property';
     reportViewValue.textContent = 'Google Search Console';
     tasksBadge.textContent = 'Ready';
     tasksChecklistContainer.innerHTML = `
-      <div class="empty-state">Please refresh your Google Search Console tab (F5) so the updated v2.0.0 exporter can attach to the page.</div>
+      <div class="empty-state">Please refresh your Google Search Console tab (F5) so the updated exporter can attach to the page.</div>
     `;
   }
 
   function setNonGscState() {
     statusPill.className = 'status-pill status-inactive';
     statusText.textContent = 'Not on GSC';
-    propertyValue.textContent = 'None';
     reportViewValue.textContent = 'Open Google Search Console';
     tasksBadge.textContent = '0 files';
 
@@ -230,11 +215,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     window.close();
   });
 
-  // Quick Switch Navigation
+  // Quick Switch Navigation (Property-Agnostic: preserves current query string)
   function navigateToReport(target) {
     const userMatch = activeTab?.url?.match(/search\.google\.com(\/u\/\d+|\/b\/\d+)?\/search-console/);
     const basePath = userMatch && userMatch[1] ? `${userMatch[1]}/search-console` : '/search-console';
-    const resParam = activeResourceId ? `?resource_id=${encodeURIComponent(activeResourceId)}` : '';
+    let searchQuery = '';
+    try {
+      searchQuery = activeTab?.url ? new URL(activeTab.url).search : '';
+    } catch (e) {}
 
     if (activeTab && activeTab.url && isGscUrl(activeTab.url)) {
       chrome.tabs.sendMessage(activeTab.id, { action: 'NAVIGATE_TO', target }, (res) => {
@@ -243,7 +231,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           if (target === 'page-indexing') subPath = '/index';
           if (target === 'crawl-stats') subPath = '/settings/crawl-stats';
           if (target === 'core-web-vitals') subPath = '/core-web-vitals';
-          chrome.tabs.update(activeTab.id, { url: `https://search.google.com${basePath}${subPath}${resParam}` });
+          chrome.tabs.update(activeTab.id, { url: `https://search.google.com${basePath}${subPath}${searchQuery}` });
         }
         window.close();
       });
@@ -252,7 +240,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (target === 'page-indexing') subPath = '/index';
       if (target === 'crawl-stats') subPath = '/settings/crawl-stats';
       if (target === 'core-web-vitals') subPath = '/core-web-vitals';
-      chrome.tabs.create({ url: `https://search.google.com${basePath}${subPath}${resParam}` });
+      chrome.tabs.create({ url: `https://search.google.com${basePath}${subPath}${searchQuery}` });
       window.close();
     }
   }

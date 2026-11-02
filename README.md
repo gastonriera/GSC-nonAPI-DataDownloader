@@ -1,6 +1,6 @@
-# GSC non-API Data Downloader (`v2.0.0`)
+# GSC non-API Data Downloader (`v2.0.1`)
 
-A Chrome extension (Manifest V3) that automates **1-click native file exports (`Download Excel` / `Download CSV`)** across Google Search Console reports and all of their sub-reports/drilldowns:
+A property-agnostic Chrome extension (Manifest V3) that automates **1-click native file exports (`Download Excel` / `Download CSV`)** across Google Search Console reports and all of their sub-reports/drilldowns:
 1. **Page Indexing Report** (`/index` — exports Indexed Pages + cycles through every reason in *"Why pages aren't indexed"*)
 2. **Crawl Stats Report** (`/settings/crawl-stats` — exports the main 90-day overview + cycles through all 4 breakdown tables: *By response*, *By file type*, *By purpose*, and *By Googlebot type*)
 3. **Core Web Vitals Report** (`/core-web-vitals` — opens *Mobile* and *Desktop* reports and exports their summaries + every issue drilldown)
@@ -11,12 +11,14 @@ A Chrome extension (Manifest V3) that automates **1-click native file exports (`
 
 The official Google Search Console API does not provide endpoints for Crawl Stats, Core Web Vitals aggregates, or full Page Indexing drilldowns. In the GSC web interface, downloading all of these requires manually clicking into dozens of sub-reports and clicking `Export` → `Download Excel` one by one.
 
-**GSC non-API Data Downloader (`v2.0.0`)** automates that entire process with a single click, downloading the official Google Search Console `.xlsx` (or `.zip` CSV) files and organizing them into a clean folder in your `Downloads` directory.
+**GSC non-API Data Downloader (`v2.0.1`)** automates that entire process with a single click—regardless of which domain or property type is open—downloading the official Google Search Console `.xlsx` (or `.zip` CSV) files and organizing them into a clean folder in your `Downloads` directory.
 
 ---
 
-## 🚀 Key Features (`v2.0.0`)
+## 🚀 Key Features (`v2.0.1`)
 
+* **🌐 100% Property-Agnostic**:
+  * Works on any GSC property (Domain property, URL-prefix property, subfolder, etc.) without inspecting or depending on the domain name.
 * **📊 Native Excel (`.xlsx`) & CSV (`.zip`) Export**:
   * Triggers Google Search Console's official `Export` → `Download Excel` (default) or `Download CSV` menu option on each report.
 * **🔄 Automated Sub-Report & Drilldown Crawler**:
@@ -26,7 +28,7 @@ The official Google Search Console API does not provide endpoints for Crawl Stat
 * **☑️ Interactive Checklist in Popup**:
   * Preview every detected sub-report and drilldown before exporting, with checkboxes to select all or pick specific items.
 * **📁 Automatic File Naming & Subfolder Organization**:
-  * Saves all downloaded files into `Downloads/GSC-Exports/<property>_<date>/` with descriptive, numbered filenames (e.g., `01_Page_Indexing__Indexed_Pages.xlsx`, `02_Page_Indexing__Not_found_404.xlsx`) so files never overwrite each other and are ready to be merged by a Python script.
+  * Saves all downloaded files into `Downloads/GSC-Exports/<date>/` with descriptive, numbered filenames (e.g., `01_Page_Indexing__Indexed_Pages.xlsx`, `02_Page_Indexing__Not_found_404.xlsx`) so files never overwrite each other and are ready to be merged by a Python script.
 * **📈 Live In-Page Progress Panel**:
   * Shows real-time progress (`Exporting 3 of 8...`) with a `Stop` button directly in the bottom-right corner of the GSC page.
 

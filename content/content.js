@@ -122,13 +122,6 @@
 
   function detectReportInfo() {
     const url = window.location.href;
-    const urlObj = new URL(url);
-
-    let property = urlObj.searchParams.get('resource_id') || '';
-    if (!property) {
-      const propEl = document.querySelector('[data-property-name], [aria-label*="Select property"], [aria-label*="Search property"]');
-      if (propEl) property = getCleanElementText(propEl);
-    }
 
     let reportType = 'unknown';
     let reportName = 'Google Search Console';
@@ -191,7 +184,6 @@
       reportName,
       subView,
       isDrilldown,
-      property,
       pageTitle,
       url
     };
@@ -748,7 +740,6 @@
     if (currentViewOnly) {
       showProgressPanel(1, 1, `Exporting ${reportInfo.reportName} (${format.toUpperCase()})...`);
       const res = await triggerSingleNativeExport(format, {
-        property: reportInfo.property,
         reportName: reportInfo.reportName,
         section: reportInfo.subView,
         label: reportInfo.pageTitle || reportInfo.subView || 'Current_View',
@@ -791,7 +782,6 @@
         // 1. Current View Export (e.g., Main Crawl Stats overview or active drilldown)
         if (task.type === 'current-view') {
           const res = await triggerSingleNativeExport(format, {
-            property: reportInfo.property,
             reportName: reportInfo.reportName,
             section: task.section,
             label: task.label,
@@ -825,7 +815,6 @@
           const changed = await waitForViewChange(overviewState, 7000);
           if (changed) {
             const res = await triggerSingleNativeExport(format, {
-              property: reportInfo.property,
               reportName: reportInfo.reportName,
               section: 'Indexed_Pages',
               label: 'Indexed_Pages',
@@ -860,7 +849,6 @@
           const navigated = await openDrilldownRow(matchingRow, overviewState);
           if (navigated) {
             const res = await triggerSingleNativeExport(format, {
-              property: reportInfo.property,
               reportName: reportInfo.reportName,
               section: task.section,
               label: task.label,
@@ -901,7 +889,6 @@
             // Export the Device Summary Report
             showProgressPanel(i + 1, tasksToRun.length, `CWV ${task.device}: Summary Report`);
             const summaryRes = await triggerSingleNativeExport(format, {
-              property: reportInfo.property,
               reportName: 'Core_Web_Vitals',
               section: task.device,
               label: `${task.device}_Summary`,
@@ -932,7 +919,6 @@
               const enteredIssue = await openDrilldownRow(rowToClick, deviceState);
               if (enteredIssue) {
                 const issueRes = await triggerSingleNativeExport(format, {
-                  property: reportInfo.property,
                   reportName: 'Core_Web_Vitals',
                   section: task.device,
                   label: issueTarget.label,
@@ -1119,18 +1105,17 @@
 
       if (action === 'NAVIGATE_TO') {
         const target = request.target;
-        const currentUrl = new URL(window.location.href);
-        const resourceId = currentUrl.searchParams.get('resource_id') || '';
+        const searchQuery = window.location.search || '';
         const userMatch = window.location.pathname.match(/^(\/u\/\d+|\/b\/\d+)?\/search-console/);
         const prefix = userMatch ? userMatch[0] : '/search-console';
         let newPath = '';
 
         if (target === 'page-indexing') {
-          newPath = `${prefix}/index?resource_id=${encodeURIComponent(resourceId)}`;
+          newPath = `${prefix}/index${searchQuery}`;
         } else if (target === 'crawl-stats') {
-          newPath = `${prefix}/settings/crawl-stats?resource_id=${encodeURIComponent(resourceId)}`;
+          newPath = `${prefix}/settings/crawl-stats${searchQuery}`;
         } else if (target === 'core-web-vitals') {
-          newPath = `${prefix}/core-web-vitals?resource_id=${encodeURIComponent(resourceId)}`;
+          newPath = `${prefix}/core-web-vitals${searchQuery}`;
         }
 
         if (newPath) {
