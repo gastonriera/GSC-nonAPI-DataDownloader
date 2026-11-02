@@ -1,17 +1,18 @@
 /**
- * GSC non-API Data Downloader - Content Script (v2.0.0)
+ * GSC non-API Data Downloader - Content Script (v2.1.0)
  * Automates Google Search Console's native Export menu ("Download Excel" / "Download CSV")
  * across the main report AND all sub-reports/drilldowns for:
  * 1. Page Indexing (Indexed pages + all "Why pages aren't indexed" reason drilldowns)
- * 2. Crawl Stats (Main 90-day chart export + all 4 breakdown table drilldowns)
+ * 2. Crawl Stats (Main 90-day chart export + all 4 breakdown table drilldowns:
+ *    By response, By file type, By purpose, and By Googlebot type)
  * 3. Core Web Vitals (Mobile & Desktop reports + all issue drilldowns)
  */
 
 (function () {
   'use strict';
 
-  if (window.__GSC_DOWNLOADER_V202_INITIALIZED__) return;
-  window.__GSC_DOWNLOADER_V202_INITIALIZED__ = true;
+  if (window.__GSC_DOWNLOADER_V210_INITIALIZED__) return;
+  window.__GSC_DOWNLOADER_V210_INITIALIZED__ = true;
 
   let isBatchRunning = false;
   let cancelBatchRequested = false;
@@ -43,11 +44,17 @@
   }
 
   /**
-   * Returns the currently visible <c-wiz> container for the active GSC view.
+   * Returns the top-level currently visible <c-wiz> container for the active GSC view.
    */
   function getActiveCWiz() {
     const cwizList = Array.from(document.querySelectorAll('c-wiz')).filter((el) => isElementVisible(el));
-    return cwizList.length > 0 ? cwizList[cwizList.length - 1] : document.body;
+    return cwizList.length > 0 ? cwizList[0] : document.body;
+  }
+
+  function getVisiblePageHeadingText() {
+    const headings = Array.from(document.querySelectorAll('h1, [role="heading"][aria-level="1"], .header-title'))
+      .filter((el) => isElementVisible(el));
+    return headings.length > 0 ? getCleanElementText(headings[headings.length - 1]) : '';
   }
 
   /**
@@ -116,8 +123,21 @@
   function isBackButtonVisible() {
     const backBtns = Array.from(document.querySelectorAll(
       'button[aria-label="Back" i], [role="button"][aria-label="Back" i], button[title="Back" i], [role="button"][data-tooltip="Back" i]'
-    )).filter((el) => isElementVisible(el));
+    )).filter((el) => isElementVisible(el) && !el.closest('#gsc-downloader-floating-root'));
     return backBtns.length > 0 ? backBtns[0] : null;
+  }
+
+  function isCloseButtonVisible() {
+    const closeBtns = Array.from(document.querySelectorAll(
+      'button[aria-label*="close" i], [role="button"][aria-label*="close" i], button[title*="close" i], [data-tooltip*="close" i]'
+    )).filter((el) => {
+      if (!isElementVisible(el)) return false;
+      if (el.closest('#gsc-downloader-floating-root')) return false;
+      const rect = el.getBoundingClientRect();
+      if (rect.width > 120 || rect.height > 120) return false;
+      return true;
+    });
+    return closeBtns.length > 0 ? closeBtns[0] : null;
   }
 
   function detectReportInfo() {
@@ -136,14 +156,15 @@
     if (url.includes('/settings/crawl-stats')) {
       reportType = 'crawl-stats';
       reportName = 'Crawl Stats';
-      // In Crawl Stats, clicking a breakdown row shows a Back button and an Examples table
+      // In Crawl Stats, clicking a breakdown row shows a Back button or flyout drawer Close button
       const backBtn = isBackButtonVisible();
+      const closeBtn = isCloseButtonVisible();
       if (
         url.includes('response_code=') ||
         url.includes('file_type=') ||
         url.includes('purpose=') ||
         url.includes('bot_type=') ||
-        (backBtn && pageTitle && !/crawl stats/i.test(pageTitle))
+        ((backBtn || closeBtn) && pageTitle && !/crawl stats/i.test(pageTitle))
       ) {
         isDrilldown = true;
         subView = pageTitle || 'Breakdown Drilldown';
@@ -191,9 +212,10 @@
 
   // --- NATIVE EXPORT BUTTON & MENU FINDER ---
 
-  function findVisibleExportButton() {
+  function findVisibleExportButton(excludeBtn = null) {
     const candidates = Array.from(document.querySelectorAll('button, [role="button"], a[role="button"]'))
       .filter((el) => {
+        if (excludeBtn && el === excludeBtn) return false;
         if (!isElementVisible(el)) return false;
         if (el.closest('#gsc-downloader-floating-root')) return false;
         if (el.getAttribute('aria-disabled') === 'true' || el.disabled) return false;
@@ -410,11 +432,20 @@
    * Triggers GSC's native Export button on the currently visible view and automatically
    * selects "Download Excel" (or "Download CSV").
    */
-  async function triggerSingleNativeExport(format = 'excel', meta = null) {
-    // Poll up to 4 seconds for the view's Export button to appear
+  async function triggerSingleNativeExport(format = 'excel', meta = null, excludeBtn = null) {
+    // Poll up to 6 seconds for the active view's Export button to appear
     let exportBtn = null;
-    for (let attempt = 0; attempt < 20; attempt++) {
-      exportBtn = findVisibleExportButton();
+    for (let attempt = 0; attempt < 30; attempt++) {
+      exportBtn = findVisibleExportButton(excludeBtn);
+      if (
+        !exportBtn &&
+        excludeBtn &&
+        attempt >= 12 &&
+        (isBackButtonVisible() || isCloseButtonVisible()) &&
+        findCrawlStatsBreakdownHeadings().length === 0
+      ) {
+        exportBtn = findVisibleExportButton(null);
+      }
       if (exportBtn) break;
       await sleep(200);
     }
@@ -503,6 +534,273 @@
   // --- DISCOVERING SUB-REPORTS & DRILLDOWN ROWS ---
 
   /**
+   * The 4 standard Crawl Stats breakdown tables in Google Search Console:
+   * 1. By response
+   * 2. By file type
+   * 3. By purpose
+   * 4. By Googlebot type (or By Googlebot)
+   */
+  const CRAWL_STATS_BREAKDOWNS = [
+    { id: 'by-response', section: 'By response', regex: /(?:crawl requests:?\s*)?(?:by\s+)?response(s)?/i },
+    { id: 'by-file-type', section: 'By file type', regex: /(?:crawl requests:?\s*)?(?:by\s+)?file\s+type(s)?/i },
+    { id: 'by-purpose', section: 'By purpose', regex: /(?:crawl requests:?\s*)?(?:by\s+)?purpose/i },
+    { id: 'by-googlebot', section: 'By Googlebot type', regex: /(?:crawl requests:?\s*)?(?:by\s+)?googlebot(\s+type)?/i }
+  ];
+
+  /**
+   * Signature pattern matching for Crawl Stats rows to accurately categorize them
+   * even when headings are nested, translated, or styled in custom layouts.
+   */
+  function detectCrawlStatsSectionBySignature(text) {
+    if (!text || typeof text !== 'string') return null;
+    const clean = text.trim();
+    // HTTP status codes or status strings: 200, 301, 302, 304, 404, 500, etc.
+    if (
+      /\b(200|301|302|304|307|308|400|401|403|404|410|429|500|502|503|504)\b/.test(clean) ||
+      /^(OK|Moved permanently|Temporary redirect|Redirect|Not found|Server error|Blocked|Other client error)\s*\(/i.test(clean)
+    ) {
+      return 'By response';
+    }
+    // File types
+    if (
+      /^(HTML|Image|JavaScript|CSS|JSON|PDF|Video|Audio|XML|Font|Other file type|Syndication)$/i.test(clean) ||
+      /\b(HTML|Image|JavaScript|CSS|JSON|PDF|Video|Audio)\b/i.test(clean)
+    ) {
+      return 'By file type';
+    }
+    // Purpose
+    if (/^(Refresh|Discovery)$/i.test(clean)) {
+      return 'By purpose';
+    }
+    // Googlebot types
+    if (
+      /googlebot/i.test(clean) ||
+      /^(Smartphone|Desktop|Page resource load|AdsBot|StoreBot|Feedfetcher)$/i.test(clean)
+    ) {
+      return 'By Googlebot type';
+    }
+    return null;
+  }
+
+  /**
+   * Finds the visible heading elements for each of the 4 Crawl Stats breakdowns on the page.
+   */
+  function findCrawlStatsBreakdownHeadings() {
+    const candidates = Array.from(
+      document.querySelectorAll('h1, h2, h3, h4, h5, h6, [role="heading"], div, span, p, th, td, caption')
+    ).filter((el) => isElementVisible(el) && !el.closest('#gsc-downloader-floating-root'));
+
+    const found = [];
+    for (const def of CRAWL_STATS_BREAKDOWNS) {
+      const matches = candidates.filter((el) => {
+        const txt = getCleanElementText(el);
+        return txt.length <= 45 && def.regex.test(txt);
+      });
+      if (matches.length > 0) {
+        // Pick the innermost matching element (one that doesn't contain another match)
+        const innermost =
+          matches.find((el) => !matches.some((other) => other !== el && el.contains(other))) ||
+          matches[matches.length - 1];
+        found.push({
+          ...def,
+          headingEl: innermost
+        });
+      }
+    }
+    return found;
+  }
+
+  /**
+   * Isolates the DOM container(s) belonging specifically to a single Crawl Stats breakdown card
+   * so rows from "By response", "By file type", "By purpose", and "By Googlebot type" are cleanly separated.
+   */
+  function getBreakdownCardScopeElements(item, allHeadings) {
+    const otherHeadingEls = allHeadings
+      .filter((h) => h.headingEl !== item.headingEl)
+      .map((h) => h.headingEl);
+
+    let cardRoot = item.headingEl;
+    while (cardRoot.parentElement && cardRoot.parentElement !== document.body) {
+      const parent = cardRoot.parentElement;
+      if (otherHeadingEls.some((otherEl) => parent.contains(otherEl))) {
+        break;
+      }
+      const parentText = getCleanElementText(parent);
+      if (/host status/i.test(parentText) && !/host status/i.test(getCleanElementText(cardRoot))) {
+        break;
+      }
+      cardRoot = parent;
+    }
+
+    if (cardRoot === item.headingEl || cardRoot.children.length === 0) {
+      const scopes = [];
+      let sib = item.headingEl.nextElementSibling;
+      while (sib) {
+        if (otherHeadingEls.some((otherEl) => sib === otherEl || sib.contains(otherEl))) {
+          break;
+        }
+        if (isElementVisible(sib)) {
+          scopes.push(sib);
+        }
+        sib = sib.nextElementSibling;
+      }
+      if (scopes.length > 0) return scopes;
+    }
+
+    return [cardRoot];
+  }
+
+  /**
+   * Parses a row element inside a Crawl Stats breakdown or report table into { key, section, label, count, rowElement, firstCell }.
+   */
+  function parseBreakdownRow(row, sectionTitle, headingEl = null) {
+    if (!row || !isElementVisible(row)) return null;
+    if (row.closest('#gsc-downloader-floating-root')) return null;
+    if (headingEl && (row === headingEl || row.contains(headingEl) || headingEl.contains(row))) {
+      return null;
+    }
+
+    let cellEls = Array.from(row.querySelectorAll('td, [role="cell"], [role="gridcell"]'))
+      .filter((c) => isElementVisible(c));
+
+    if (cellEls.length === 0) {
+      let children = Array.from(row.children).filter((c) => isElementVisible(c));
+      if (children.length === 1 && children[0].children.length >= 2) {
+        children = Array.from(children[0].children).filter((c) => isElementVisible(c));
+      }
+      cellEls = children;
+    }
+
+    // Filter to cells with non-empty text (ignores progress bar graphic cells)
+    const nonEmptyCells = cellEls
+      .map((el) => ({ el, text: getCleanElementText(el) }))
+      .filter((item) => item.text.length > 0);
+
+    let label = '';
+    let count = '';
+    let firstCell = row;
+
+    if (nonEmptyCells.length >= 2) {
+      label = nonEmptyCells[0].text;
+      count = nonEmptyCells[nonEmptyCells.length - 1].text;
+      firstCell = nonEmptyCells[0].el;
+    } else {
+      const fullText = nonEmptyCells.length === 1 ? nonEmptyCells[0].text : getCleanElementText(row);
+      const match = fullText.match(/^(.+?)\s+(\d[\d,.]*%?)$/);
+      if (!match) return null;
+      label = match[1].trim();
+      count = match[2].trim();
+      firstCell = nonEmptyCells.length === 1 ? nonEmptyCells[0].el : row;
+    }
+
+    if (!label || label.length > 140) return null;
+
+    // Skip table header labels, breakdown titles, or pagination controls
+    if (/^(reason|response|file type|purpose|googlebot(\s+type)?|metric|status|url|rows per page|by response|by file type|by purpose|by googlebot(\s+type)?)$/i.test(label)) {
+      return null;
+    }
+
+    // Skip Crawl Stats Host Status rows (Robots.txt fetch, DNS resolution, Server connectivity)
+    if (/^(robots\.txt fetch|dns resolution|server connectivity)$/i.test(label)) {
+      return null;
+    }
+
+    // Reject if label is purely a number or percentage
+    if (/^\d[\d,.]*%?$/.test(label)) {
+      return null;
+    }
+
+    if (!sectionTitle || sectionTitle === 'Breakdown' || sectionTitle === 'Report Table') {
+      const sigSection = detectCrawlStatsSectionBySignature(label);
+      if (sigSection) {
+        sectionTitle = sigSection;
+      }
+    }
+
+    const interactiveRow =
+      row.closest('tr, [role="row"], [role="listitem"], a[href], [role="button"], [tabindex="0"], [jsaction]') || row;
+
+    return {
+      key: `${sectionTitle}::${label}`,
+      section: sectionTitle,
+      label,
+      count,
+      rowElement: interactiveRow && (!headingEl || !interactiveRow.contains(headingEl)) ? interactiveRow : row,
+      firstCell
+    };
+  }
+
+  /**
+   * Discovers all clickable breakdown rows across all 4 Crawl Stats breakdowns:
+   * By response, By file type, By purpose, and By Googlebot type.
+   */
+  function findCrawlStatsBreakdownRows() {
+    const headings = findCrawlStatsBreakdownHeadings();
+    const discovered = [];
+    const seenKeys = new Set();
+
+    for (const item of headings) {
+      const scopes = getBreakdownCardScopeElements(item, headings);
+      let candidateRows = [];
+
+      // Pass 1: Standard table and ARIA rows inside this breakdown card
+      for (const scope of scopes) {
+        const rows = Array.from(
+          scope.querySelectorAll('tbody tr, tr[role="row"], table tr, [role="row"], [role="listitem"], [role="option"]')
+        ).filter((r) => {
+          if (!isElementVisible(r)) return false;
+          if (r.closest('thead')) return false;
+          if (r.querySelector('th, [role="columnheader"]')) return false;
+          if (r === item.headingEl || r.contains(item.headingEl) || item.headingEl.contains(r)) return false;
+          return true;
+        });
+        candidateRows.push(...rows);
+      }
+
+      // Keep innermost rows if nested
+      candidateRows = candidateRows.filter(
+        (r) => !candidateRows.some((other) => other !== r && r.contains(other))
+      );
+
+      let parsedForSection = [];
+      for (const r of candidateRows) {
+        const parsed = parseBreakdownRow(r, item.section, item.headingEl);
+        if (parsed && !seenKeys.has(parsed.key)) {
+          seenKeys.add(parsed.key);
+          parsedForSection.push(parsed);
+        }
+      }
+
+      // Pass 2: Fallback for div/link/jsaction-based breakdown rows if Pass 1 found none in this card
+      if (parsedForSection.length === 0) {
+        let fallbackEls = [];
+        for (const scope of scopes) {
+          const els = Array.from(
+            scope.querySelectorAll('a[href], [role="link"], [role="button"], [tabindex="0"], [jsaction], div, li')
+          ).filter((el) => {
+            if (!isElementVisible(el)) return false;
+            if (el === item.headingEl || el.contains(item.headingEl) || item.headingEl.contains(el)) return false;
+            return true;
+          });
+          fallbackEls.push(...els);
+        }
+
+        for (const el of fallbackEls) {
+          const parsed = parseBreakdownRow(el, item.section, item.headingEl);
+          if (parsed && !seenKeys.has(parsed.key)) {
+            seenKeys.add(parsed.key);
+            parsedForSection.push(parsed);
+          }
+        }
+      }
+
+      discovered.push(...parsedForSection);
+    }
+
+    return discovered;
+  }
+
+  /**
    * Finds the "View data about indexed pages" button on the Page Indexing overview.
    */
   function findIndexedPagesButton() {
@@ -558,8 +856,20 @@
     // Do not treat example URL lists inside a single drilldown as sub-report drilldowns
     if (reportInfo.isDrilldown) return [];
 
-    const activeRoot = getActiveCWiz();
-    const rowElements = Array.from(activeRoot.querySelectorAll('tbody tr, tr[role="row"], [role="row"]'))
+    const discoveredRows = [];
+    const seenKeys = new Set();
+
+    // On Crawl Stats, first run the dedicated 4-breakdown scanner (By response, By file type, By purpose, By Googlebot type)
+    if (reportInfo.reportType === 'crawl-stats') {
+      const breakdownRows = findCrawlStatsBreakdownRows();
+      breakdownRows.forEach((r) => {
+        seenKeys.add(r.key);
+        discoveredRows.push(r);
+      });
+    }
+
+    // Query document directly (filtered by isElementVisible) so nested <c-wiz> cards are never missed
+    const rowElements = Array.from(document.querySelectorAll('tbody tr, tr[role="row"], [role="row"]'))
       .filter((row) => {
         if (!isElementVisible(row)) return false;
         if (row.closest('thead')) return false;
@@ -568,23 +878,31 @@
         return true;
       });
 
-    const discoveredRows = [];
-    const seenKeys = new Set();
-
     rowElements.forEach((row) => {
-      let cells = Array.from(row.querySelectorAll('td, [role="cell"], [role="gridcell"]'));
-      if (cells.length === 0) {
-        cells = Array.from(row.children);
+      // Skip if this DOM row was already captured by findCrawlStatsBreakdownRows
+      if (discoveredRows.some((d) => d.rowElement === row || d.rowElement.contains(row) || row.contains(d.rowElement))) {
+        return;
       }
-      if (cells.length < 2) return;
 
-      const firstCellText = getCleanElementText(cells[0]);
-      const lastCellText = getCleanElementText(cells[cells.length - 1]);
+      let cells = Array.from(row.querySelectorAll('td, [role="cell"], [role="gridcell"]'))
+        .filter((c) => isElementVisible(c));
+      if (cells.length === 0) {
+        cells = Array.from(row.children).filter((c) => isElementVisible(c));
+      }
+
+      const nonEmptyCells = cells
+        .map((el) => ({ el, text: getCleanElementText(el) }))
+        .filter((item) => item.text.length > 0);
+
+      if (nonEmptyCells.length < 2) return;
+
+      const firstCellText = nonEmptyCells[0].text;
+      const lastCellText = nonEmptyCells[nonEmptyCells.length - 1].text;
 
       if (!firstCellText || firstCellText.length > 140) return;
 
       // Skip table header labels or pagination rows
-      if (/^(reason|response|file type|purpose|googlebot type|metric|status|url|rows per page)$/i.test(firstCellText)) {
+      if (/^(reason|response|file type|purpose|googlebot(\s+type)?|metric|status|url|rows per page)$/i.test(firstCellText)) {
         return;
       }
 
@@ -602,6 +920,14 @@
         while (prev && !sectionTitle) {
           if (/H[1-6]/.test(prev.tagName) || prev.matches('[role="heading"]')) {
             sectionTitle = getCleanElementText(prev);
+          } else {
+            const prevTxt = getCleanElementText(prev);
+            for (const bDef of CRAWL_STATS_BREAKDOWNS) {
+              if (bDef.regex.test(prevTxt)) {
+                sectionTitle = bDef.section;
+                break;
+              }
+            }
           }
           prev = prev.previousElementSibling;
         }
@@ -616,9 +942,11 @@
         }
       }
 
-      if (!sectionTitle) {
+      if (!sectionTitle || sectionTitle === 'Breakdown') {
         if (reportInfo.reportType === 'page-indexing') sectionTitle = 'Why pages aren\'t indexed';
-        else if (reportInfo.reportType === 'crawl-stats') sectionTitle = 'Breakdown';
+        else if (reportInfo.reportType === 'crawl-stats') {
+          sectionTitle = detectCrawlStatsSectionBySignature(firstCellText) || 'Breakdown';
+        }
         else if (reportInfo.reportType === 'core-web-vitals') sectionTitle = reportInfo.subView || 'Issues';
         else sectionTitle = 'Report Table';
       }
@@ -633,7 +961,7 @@
         label: firstCellText,
         count: lastCellText,
         rowElement: row,
-        firstCell: cells[0]
+        firstCell: nonEmptyCells[0].el
       });
     });
 
@@ -793,8 +1121,21 @@
       url: window.location.href,
       cWiz: getActiveCWiz(),
       exportBtn: findVisibleExportButton(),
-      backBtnVisible: !!isBackButtonVisible()
+      backBtnVisible: !!isBackButtonVisible(),
+      closeBtnVisible: !!isCloseButtonVisible(),
+      headingText: getVisiblePageHeadingText(),
+      breakdownCount: findCrawlStatsBreakdownHeadings().length
     };
+  }
+
+  function isAtViewState(targetState) {
+    if (window.location.href !== targetState.url) return false;
+    if (!!isBackButtonVisible() !== targetState.backBtnVisible) return false;
+    if (!!isCloseButtonVisible() !== targetState.closeBtnVisible) return false;
+    if (targetState.breakdownCount > 0 && findCrawlStatsBreakdownHeadings().length === 0) return false;
+    const currentHeading = getVisiblePageHeadingText();
+    if (targetState.headingText && currentHeading && currentHeading !== targetState.headingText) return false;
+    return true;
   }
 
   async function waitForViewChange(prevState, timeoutMs = 7000) {
@@ -805,13 +1146,30 @@
       const currentCWiz = getActiveCWiz();
       const currentExportBtn = findVisibleExportButton();
       const hasBackBtn = !!isBackButtonVisible();
+      const hasCloseBtn = !!isCloseButtonVisible();
+      const currentHeading = getVisiblePageHeadingText();
+      const currentBreakdownCount = findCrawlStatsBreakdownHeadings().length;
 
       const urlChanged = currentUrl !== prevState.url;
       const cWizChanged = currentCWiz !== prevState.cWiz;
       const exportBtnChanged = currentExportBtn && currentExportBtn !== prevState.exportBtn;
+      const prevExportBtnHidden = prevState.exportBtn && !isElementVisible(prevState.exportBtn);
       const backBtnAppeared = !prevState.backBtnVisible && hasBackBtn;
+      const closeBtnAppeared = !prevState.closeBtnVisible && hasCloseBtn;
+      const headingChanged = prevState.headingText && currentHeading && currentHeading !== prevState.headingText;
+      const breakdownsHidden = prevState.breakdownCount > 0 && currentBreakdownCount === 0;
 
-      if (urlChanged || cWizChanged || exportBtnChanged || backBtnAppeared) {
+      // Ensure the DOM view actually transitioned (not just URL change while old view is still visible)
+      if (
+        cWizChanged ||
+        exportBtnChanged ||
+        prevExportBtnHidden ||
+        backBtnAppeared ||
+        closeBtnAppeared ||
+        headingChanged ||
+        breakdownsHidden ||
+        (urlChanged && (!prevState.exportBtn || !isElementVisible(prevState.exportBtn)))
+      ) {
         // Give GSC's new view 600ms to finish rendering its toolbar & Export button
         await sleep(600);
         return true;
@@ -820,26 +1178,69 @@
     return false;
   }
 
-  async function returnToViewState(targetState, timeoutMs = 7000) {
-    if (window.location.href === targetState.url && getActiveCWiz() === targetState.cWiz) {
+  async function returnToViewState(targetState, timeoutMs = 7500) {
+    if (isAtViewState(targetState)) {
       return true;
     }
 
-    window.history.back();
+    // Prefer closing any flyout drawer/dialog first
+    const initialCloseBtn = isCloseButtonVisible();
+    if (initialCloseBtn && !targetState.closeBtnVisible) {
+      dispatchRealClick(initialCloseBtn);
+      try { initialCloseBtn.click(); } catch (e) {}
+    } else {
+      // Otherwise, prefer clicking GSC's in-page Back button or history.back()
+      const initialBackBtn = isBackButtonVisible();
+      if (initialBackBtn && !targetState.backBtnVisible) {
+        dispatchRealClick(initialBackBtn);
+      } else {
+        window.history.back();
+      }
+    }
 
+    let usedHistoryBack = false;
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
       await sleep(200);
-      if (window.location.href === targetState.url && getActiveCWiz() === targetState.cWiz) {
+      if (isAtViewState(targetState)) {
         await sleep(450);
         return true;
       }
-      // If after 2.5 seconds history.back() hasn't returned, try clicking GSC's Back button
-      if (Date.now() - start > 2500) {
+
+      const elapsed = Date.now() - start;
+      if (elapsed > 1200) {
+        const curClose = isCloseButtonVisible();
+        if (curClose && !targetState.closeBtnVisible) {
+          dispatchRealClick(curClose);
+          try { curClose.click(); } catch (e) {}
+          document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+        }
+      }
+
+      if (elapsed > 2000 && !usedHistoryBack) {
+        const curClose = isCloseButtonVisible();
+        if (curClose && !targetState.closeBtnVisible) {
+          dispatchRealClick(curClose);
+          try { curClose.click(); } catch (e) {}
+        } else {
+          usedHistoryBack = true;
+          const backBtn = isBackButtonVisible();
+          if (backBtn && !targetState.backBtnVisible) {
+            try { backBtn.click(); } catch (e) {}
+          }
+          if (window.location.href !== targetState.url) {
+            window.history.back();
+          }
+        }
+      } else if (elapsed > 2800) {
+        const curClose = isCloseButtonVisible();
+        if (curClose && !targetState.closeBtnVisible) {
+          document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+        }
         const backBtn = isBackButtonVisible();
         if (backBtn && !targetState.backBtnVisible) {
           dispatchRealClick(backBtn);
-          await sleep(600);
+          await sleep(500);
         }
       }
     }
@@ -854,19 +1255,36 @@
   async function openDrilldownRow(rowItem, prevState) {
     const { rowElement, firstCell } = rowItem;
     rowElement.scrollIntoView({ block: 'center', inline: 'center' });
-    await sleep(150);
+    await sleep(180);
 
-    // Check if there is a link inside the row
-    const link = rowElement.querySelector('a[href]');
+    // Check if there is a link inside or wrapping the row
+    const link = rowElement.querySelector('a[href]') || rowElement.closest('a[href]');
     const primaryTarget = link || firstCell || rowElement;
 
     dispatchRealClick(primaryTarget);
 
-    // Wait up to 600ms; if view hasn't started changing, also trigger native .click() on cell and row
-    await sleep(450);
-    if (window.location.href === prevState.url && getActiveCWiz() === prevState.cWiz) {
-      try { firstCell.click(); } catch (e) {}
+    // Wait 400ms; if view hasn't started changing, also click rowElement directly and trigger Enter key
+    await sleep(400);
+    if (isAtViewState(prevState)) {
+      if (rowElement !== primaryTarget) {
+        dispatchRealClick(rowElement);
+      }
+      try { primaryTarget.click(); } catch (e) {}
       try { rowElement.click(); } catch (e) {}
+
+      const keyOpts = {
+        key: 'Enter',
+        code: 'Enter',
+        keyCode: 13,
+        which: 13,
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        view: window
+      };
+      rowElement.dispatchEvent(new KeyboardEvent('keydown', keyOpts));
+      rowElement.dispatchEvent(new KeyboardEvent('keypress', keyOpts));
+      rowElement.dispatchEvent(new KeyboardEvent('keyup', keyOpts));
     }
 
     return waitForViewChange(prevState, 7000);
@@ -956,18 +1374,22 @@
 
           dispatchRealClick(indexedBtn);
           await sleep(400);
-          if (window.location.href === overviewState.url && getActiveCWiz() === overviewState.cWiz) {
+          if (isAtViewState(overviewState)) {
             try { indexedBtn.click(); } catch (e) {}
           }
 
           const changed = await waitForViewChange(overviewState, 7000);
           if (changed) {
-            const res = await triggerSingleNativeExport(format, {
-              reportName: reportInfo.reportName,
-              section: 'Indexed_Pages',
-              label: 'Indexed_Pages',
-              index: fileIndex
-            });
+            const res = await triggerSingleNativeExport(
+              format,
+              {
+                reportName: reportInfo.reportName,
+                section: 'Indexed_Pages',
+                label: 'Indexed_Pages',
+                index: fileIndex
+              },
+              overviewState.exportBtn
+            );
             if (res.success) {
               exportedCount++;
               fileIndex++;
@@ -981,12 +1403,13 @@
           continue;
         }
 
-        // 3. Table Row Drilldown (Page Indexing reasons, Crawl Stats breakdowns, CWV issues)
+        // 3. Table Row Drilldown (Page Indexing reasons, Crawl Stats 4 breakdowns, CWV issues)
         if (task.type === 'table-row') {
           const overviewState = captureViewState();
           const currentRows = findClickableTableRows(detectReportInfo());
           const matchingRow =
             currentRows.find((r) => r.key === task.rowKey) ||
+            currentRows.find((r) => r.section === task.section && r.label === task.label) ||
             currentRows.find((r) => r.label === task.label);
 
           if (!matchingRow) {
@@ -996,12 +1419,16 @@
 
           const navigated = await openDrilldownRow(matchingRow, overviewState);
           if (navigated) {
-            const res = await triggerSingleNativeExport(format, {
-              reportName: reportInfo.reportName,
-              section: task.section,
-              label: task.label,
-              index: fileIndex
-            });
+            const res = await triggerSingleNativeExport(
+              format,
+              {
+                reportName: reportInfo.reportName,
+                section: task.section,
+                label: task.label,
+                index: fileIndex
+              },
+              overviewState.exportBtn
+            );
             if (res.success) {
               exportedCount++;
               fileIndex++;
@@ -1028,7 +1455,7 @@
 
           dispatchRealClick(targetBtnObj.element);
           await sleep(400);
-          if (window.location.href === cwvOverviewState.url && getActiveCWiz() === cwvOverviewState.cWiz) {
+          if (isAtViewState(cwvOverviewState)) {
             try { targetBtnObj.element.click(); } catch (e) {}
           }
 
@@ -1036,12 +1463,16 @@
           if (enteredDeviceReport) {
             // Export the Device Summary Report
             showProgressPanel(i + 1, tasksToRun.length, `CWV ${task.device}: Summary Report`);
-            const summaryRes = await triggerSingleNativeExport(format, {
-              reportName: 'Core_Web_Vitals',
-              section: task.device,
-              label: `${task.device}_Summary`,
-              index: fileIndex
-            });
+            const summaryRes = await triggerSingleNativeExport(
+              format,
+              {
+                reportName: 'Core_Web_Vitals',
+                section: task.device,
+                label: `${task.device}_Summary`,
+                index: fileIndex
+              },
+              cwvOverviewState.exportBtn
+            );
             if (summaryRes.success) {
               exportedCount++;
               fileIndex++;
@@ -1066,12 +1497,16 @@
 
               const enteredIssue = await openDrilldownRow(rowToClick, deviceState);
               if (enteredIssue) {
-                const issueRes = await triggerSingleNativeExport(format, {
-                  reportName: 'Core_Web_Vitals',
-                  section: task.device,
-                  label: issueTarget.label,
-                  index: fileIndex
-                });
+                const issueRes = await triggerSingleNativeExport(
+                  format,
+                  {
+                    reportName: 'Core_Web_Vitals',
+                    section: task.device,
+                    label: issueTarget.label,
+                    index: fileIndex
+                  },
+                  deviceState.exportBtn
+                );
                 if (issueRes.success) {
                   exportedCount++;
                   fileIndex++;
@@ -1221,7 +1656,7 @@
       const action = request.action;
 
       if (action === 'PING') {
-        const ver = chrome.runtime?.getManifest ? chrome.runtime.getManifest().version : '2.0.2';
+        const ver = chrome.runtime?.getManifest ? chrome.runtime.getManifest().version : '2.1.0';
         sendResponse({ pong: true, version: ver });
         return true;
       }
