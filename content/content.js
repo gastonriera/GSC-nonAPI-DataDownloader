@@ -77,7 +77,7 @@
     const pageTitle = headingEl ? headingEl.textContent.trim() : '';
 
     return {
-      isGSC: url.includes('search.google.com/search-console'),
+      isGSC: url.includes('search.google.com') && url.includes('search-console'),
       reportType,
       reportName,
       subView,
@@ -613,6 +613,11 @@
     chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       const action = request.action;
 
+      if (action === 'PING') {
+        sendResponse({ pong: true });
+        return true;
+      }
+
       if (action === 'GET_STATUS') {
         const reportInfo = detectReportInfo();
         const tables = scrapeAllTables();
@@ -647,14 +652,16 @@
         const target = request.target;
         const currentUrl = new URL(window.location.href);
         const resourceId = currentUrl.searchParams.get('resource_id') || '';
+        const userMatch = window.location.pathname.match(/^(\/u\/\d+|\/b\/\d+)?\/search-console/);
+        const prefix = userMatch ? userMatch[0] : '/search-console';
         let newPath = '';
 
         if (target === 'page-indexing') {
-          newPath = `/search-console/index?resource_id=${encodeURIComponent(resourceId)}`;
+          newPath = `${prefix}/index?resource_id=${encodeURIComponent(resourceId)}`;
         } else if (target === 'crawl-stats') {
-          newPath = `/search-console/settings/crawl-stats?resource_id=${encodeURIComponent(resourceId)}`;
+          newPath = `${prefix}/settings/crawl-stats?resource_id=${encodeURIComponent(resourceId)}`;
         } else if (target === 'core-web-vitals') {
-          newPath = `/search-console/core-web-vitals?resource_id=${encodeURIComponent(resourceId)}`;
+          newPath = `${prefix}/core-web-vitals?resource_id=${encodeURIComponent(resourceId)}`;
         }
 
         if (newPath) {
@@ -685,3 +692,4 @@
   }
 
 })();
+

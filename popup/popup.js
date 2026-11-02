@@ -46,11 +46,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     progressOverlay.classList.add('hidden');
   }
 
+  function isGscUrl(url) {
+    return Boolean(url && url.includes('search.google.com') && url.includes('search-console'));
+  }
+
   // Get current active tab
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   activeTab = tab;
 
-  if (!activeTab || !activeTab.url || !activeTab.url.includes('search.google.com/search-console')) {
+  if (!activeTab || !activeTab.url || !isGscUrl(activeTab.url)) {
     setNonGscState();
     return;
   }
@@ -256,27 +260,29 @@ document.addEventListener('DOMContentLoaded', async () => {
   // --- QUICK SWITCH / JUMP HANDLERS ---
 
   function navigateToReport(target) {
-    if (activeTab && activeTab.url && activeTab.url.includes('search.google.com/search-console')) {
+    const userMatch = activeTab?.url?.match(/search\.google\.com(\/u\/\d+|\/b\/\d+)?\/search-console/);
+    const basePath = userMatch && userMatch[1] ? `${userMatch[1]}/search-console` : '/search-console';
+    const resParam = activeResourceId ? `?resource_id=${encodeURIComponent(activeResourceId)}` : '';
+
+    if (activeTab && activeTab.url && isGscUrl(activeTab.url)) {
       chrome.tabs.sendMessage(activeTab.id, { action: 'NAVIGATE_TO', target }, (res) => {
         if (chrome.runtime.lastError || !res?.success) {
           // Direct fallback navigation
-          const resParam = activeResourceId ? `?resource_id=${encodeURIComponent(activeResourceId)}` : '';
-          let path = '/search-console';
-          if (target === 'page-indexing') path += '/index';
-          if (target === 'crawl-stats') path += '/settings/crawl-stats';
-          if (target === 'core-web-vitals') path += '/core-web-vitals';
-          chrome.tabs.update(activeTab.id, { url: `https://search.google.com${path}${resParam}` });
+          let subPath = '';
+          if (target === 'page-indexing') subPath = '/index';
+          if (target === 'crawl-stats') subPath = '/settings/crawl-stats';
+          if (target === 'core-web-vitals') subPath = '/core-web-vitals';
+          chrome.tabs.update(activeTab.id, { url: `https://search.google.com${basePath}${subPath}${resParam}` });
         }
         window.close();
       });
     } else {
       // Open in new tab or current tab
-      const resParam = activeResourceId ? `?resource_id=${encodeURIComponent(activeResourceId)}` : '';
-      let path = '/search-console';
-      if (target === 'page-indexing') path += '/index';
-      if (target === 'crawl-stats') path += '/settings/crawl-stats';
-      if (target === 'core-web-vitals') path += '/core-web-vitals';
-      chrome.tabs.create({ url: `https://search.google.com${path}${resParam}` });
+      let subPath = '';
+      if (target === 'page-indexing') subPath = '/index';
+      if (target === 'crawl-stats') subPath = '/settings/crawl-stats';
+      if (target === 'core-web-vitals') subPath = '/core-web-vitals';
+      chrome.tabs.create({ url: `https://search.google.com${basePath}${subPath}${resParam}` });
       window.close();
     }
   }
