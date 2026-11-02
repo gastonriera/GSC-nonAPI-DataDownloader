@@ -1,46 +1,159 @@
 /**
- * GSC non-API Data Downloader - Content Script
- * Extracts data from Google Search Console reports:
- * 1. Page Indexing (Overview & Drilldowns)
- * 2. Crawl Stats (Summary, Host Status, & 4 Breakdowns)
- * 3. Core Web Vitals (Mobile, Desktop, & Drilldowns)
- * Supports 1-Click ZIP bundling, individual CSVs, raw JSON, and triggering Google's native CSV export.
+ * GSC non-API Data Downloader - Content Script (v2.0.0)
+ * Automates Google Search Console's native Export menu ("Download Excel" / "Download CSV")
+ * across the main report AND all sub-reports/drilldowns for:
+ * 1. Page Indexing (Indexed pages + all "Why pages aren't indexed" reason drilldowns)
+ * 2. Crawl Stats (Main 90-day chart export + all 4 breakdown table drilldowns)
+ * 3. Core Web Vitals (Mobile & Desktop reports + all issue drilldowns)
  */
 
 (function () {
   'use strict';
 
-  // Prevent multiple injections
-  if (window.__GSC_DOWNLOADER_INITIALIZED__) return;
-  window.__GSC_DOWNLOADER_INITIALIZED__ = true;
+  if (window.__GSC_DOWNLOADER_V2_INITIALIZED__) return;
+  window.__GSC_DOWNLOADER_V2_INITIALIZED__ = true;
+
+  let isBatchRunning = false;
+  let cancelBatchRequested = false;
+  let batchProgressState = null;
+
+  // --- UTILITIES & VISIBILITY HELPERS ---
+
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Checks if an element is genuinely visible on screen (excludes hidden <c-wiz> SPA views).
+   */
+  function isElementVisible(el) {
+    if (!el || !el.isConnected) return false;
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return false;
+
+    let cur = el;
+    while (cur && cur !== document.documentElement) {
+      const style = window.getComputedStyle(cur);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+        return false;
+      }
+      cur = cur.parentElement;
+    }
+    return true;
+  }
+
+  /**
+   * Returns the currently visible <c-wiz> container for the active GSC view.
+   */
+  function getActiveCWiz() {
+    const cwizList = Array.from(document.querySelectorAll('c-wiz')).filter((el) => isElementVisible(el));
+    return cwizList.length > 0 ? cwizList[cwizList.length - 1] : document.body;
+  }
+
+  /**
+   * Extracts clean human-readable text from an element, stripping Material icon ligatures.
+   */
+  function getCleanElementText(el) {
+    if (!el) return '';
+    const clone = el.cloneNode(true);
+    const junkSelectors = [
+      'i',
+      'svg',
+      '.google-material-icons',
+      '.material-icons',
+      '.DPvwYc',
+      '[aria-hidden="true"]'
+    ];
+    clone.querySelectorAll(junkSelectors.join(',')).forEach((node) => node.remove());
+
+    return (clone.textContent || '')
+      .replace(/\b(file_download|save_alt|arrow_drop_down|open_in_new|help_outline|info_outline|chevron_right|arrow_back|error|warning|check_circle|cancel|info|Learn more)\b/gi, '')
+      .replace(/[\r\n\t]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  /**
+   * Dispatches a full browser pointer + mouse click sequence so Google Closure (jsaction)
+   * and Angular Material components respond reliably.
+   */
+  function dispatchRealClick(el) {
+    if (!el) return;
+    el.scrollIntoView({ block: 'center', inline: 'center' });
+    const rect = el.getBoundingClientRect();
+    const x = rect.left + rect.width / 2;
+    const y = rect.top + rect.height / 2;
+
+    const opts = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      view: window,
+      clientX: x,
+      clientY: y,
+      screenX: x,
+      screenY: y,
+      button: 0,
+      buttons: 1
+    };
+
+    el.dispatchEvent(new PointerEvent('pointerover', opts));
+    el.dispatchEvent(new MouseEvent('mouseover', opts));
+    el.dispatchEvent(new PointerEvent('pointerenter', opts));
+    el.dispatchEvent(new MouseEvent('mouseenter', opts));
+    el.dispatchEvent(new PointerEvent('pointerdown', opts));
+    el.dispatchEvent(new MouseEvent('mousedown', opts));
+    if (typeof el.focus === 'function') {
+      try { el.focus({ preventScroll: true }); } catch (e) {}
+    }
+    el.dispatchEvent(new PointerEvent('pointerup', { ...opts, buttons: 0 }));
+    el.dispatchEvent(new MouseEvent('mouseup', { ...opts, buttons: 0 }));
+    el.dispatchEvent(new MouseEvent('click', { ...opts, buttons: 0 }));
+  }
 
   // --- REPORT DETECTION ---
+
+  function isBackButtonVisible() {
+    const backBtns = Array.from(document.querySelectorAll(
+      'button[aria-label="Back" i], [role="button"][aria-label="Back" i], button[title="Back" i], [role="button"][data-tooltip="Back" i]'
+    )).filter((el) => isElementVisible(el));
+    return backBtns.length > 0 ? backBtns[0] : null;
+  }
 
   function detectReportInfo() {
     const url = window.location.href;
     const urlObj = new URL(url);
 
-    // Extract property (resource_id)
     let property = urlObj.searchParams.get('resource_id') || '';
     if (!property) {
-      // Try finding property in page DOM (dropdown or title)
-      const propEl = document.querySelector('[data-property-name], [aria-label*="Select property"], .property-selector-text');
-      if (propEl) {
-        property = propEl.textContent.trim();
-      }
+      const propEl = document.querySelector('[data-property-name], [aria-label*="Select property"], [aria-label*="Search property"]');
+      if (propEl) property = getCleanElementText(propEl);
     }
 
     let reportType = 'unknown';
     let reportName = 'Google Search Console';
     let isDrilldown = false;
-    let subView = '';
+    let subView = 'Overview';
+
+    const headingEl = Array.from(document.querySelectorAll('h1, [role="heading"][aria-level="1"], .header-title'))
+      .filter((el) => isElementVisible(el))
+      .pop();
+    const pageTitle = headingEl ? getCleanElementText(headingEl) : '';
 
     if (url.includes('/settings/crawl-stats')) {
       reportType = 'crawl-stats';
       reportName = 'Crawl Stats';
-      if (url.includes('response_code=') || url.includes('file_type=') || url.includes('purpose=') || url.includes('bot_type=')) {
+      // In Crawl Stats, clicking a breakdown row shows a Back button and an Examples table
+      const backBtn = isBackButtonVisible();
+      if (
+        url.includes('response_code=') ||
+        url.includes('file_type=') ||
+        url.includes('purpose=') ||
+        url.includes('bot_type=') ||
+        (backBtn && pageTitle && !/crawl stats/i.test(pageTitle))
+      ) {
         isDrilldown = true;
-        subView = 'Breakdown Drilldown';
+        subView = pageTitle || 'Breakdown Drilldown';
       } else {
         subView = 'Overview';
       }
@@ -49,7 +162,7 @@
       reportName = 'Page Indexing';
       if (url.includes('/drilldown') || url.includes('item_key=')) {
         isDrilldown = true;
-        subView = 'Reason Drilldown';
+        subView = pageTitle || 'Reason Drilldown';
       } else {
         subView = 'Overview';
       }
@@ -58,10 +171,10 @@
       reportName = 'Core Web Vitals';
       if (url.includes('/drilldown') || url.includes('item_key=')) {
         isDrilldown = true;
-        subView = 'Issue Drilldown';
-      } else if (url.includes('device=2') || url.includes('/mobile')) {
+        subView = pageTitle || 'Issue Drilldown';
+      } else if (url.includes('device=2') || url.includes('/mobile') || /mobile/i.test(pageTitle)) {
         subView = 'Mobile Report';
-      } else if (url.includes('device=1') || url.includes('/desktop')) {
+      } else if (url.includes('device=1') || url.includes('/desktop') || /desktop/i.test(pageTitle)) {
         subView = 'Desktop Report';
       } else {
         subView = 'Overview';
@@ -72,10 +185,6 @@
       subView = 'Overview';
     }
 
-    // Try detecting heading text from DOM
-    const headingEl = document.querySelector('h1, [role="heading"][aria-level="1"], .header-title');
-    const pageTitle = headingEl ? headingEl.textContent.trim() : '';
-
     return {
       isGSC: url.includes('search.google.com') && url.includes('search-console'),
       reportType,
@@ -84,476 +193,834 @@
       isDrilldown,
       property,
       pageTitle,
-      url,
-      timestamp: new Date().toISOString()
+      url
     };
   }
 
-  // --- CLEAN TEXT UTILITY ---
+  // --- NATIVE EXPORT BUTTON & MENU FINDER ---
 
-  function cleanText(text) {
-    if (!text) return '';
-    return text
-      .replace(/[\r\n\t]+/g, ' ')
-      .replace(/\s+/g, ' ')
-      .replace(/Learn more/gi, '')
-      .replace(/arrow_drop_down/gi, '')
-      .replace(/open_in_new/gi, '')
-      .replace(/help_outline/gi, '')
-      .replace(/info_outline/gi, '')
-      .trim();
-  }
-
-  // --- DOM TABLE & GRID SCRAPING ENGINE ---
-
-  function scrapeAllTables() {
-    const detectedTables = [];
-    const seenElements = new Set();
-
-    // Strategy 1: Look for explicit HTML tables and ARIA tables/grids
-    const tableContainers = Array.from(document.querySelectorAll(
-      'table, [role="table"], [role="grid"], [role="treegrid"], div[role="rowgroup"]'
-    ));
-
-    // Also look for containers that hold repeated role="row"
-    const rowHolders = Array.from(document.querySelectorAll('div, section')).filter(el => {
-      const rows = el.querySelectorAll(':scope > [role="row"], :scope > div > [role="row"]');
-      return rows.length >= 2;
-    });
-
-    const allContainers = [...new Set([...tableContainers, ...rowHolders])];
-
-    allContainers.forEach((container, index) => {
-      if (seenElements.has(container)) return;
-
-      // Extract rows
-      const rowElements = Array.from(container.querySelectorAll('[role="row"], tr'));
-      if (rowElements.length === 0) return;
-
-      // Mark container and child rows as seen
-      seenElements.add(container);
-      rowElements.forEach(r => seenElements.add(r));
-
-      // Determine Table Title / Preceding Header
-      let title = '';
-      let prev = container.previousElementSibling;
-      while (prev && !title) {
-        if (/H[1-6]/.test(prev.tagName) || prev.matches('[role="heading"], .card-header, .title, .header')) {
-          title = cleanText(prev.textContent);
-        }
-        prev = prev.previousElementSibling;
-      }
-
-      if (!title) {
-        // Look up parent card or section
-        const parentCard = container.closest('section, [role="region"], .card, .widget, .dashboard-card');
-        if (parentCard) {
-          const cardHeader = parentCard.querySelector('h1, h2, h3, h4, [role="heading"], .title, .card-title');
-          if (cardHeader) {
-            title = cleanText(cardHeader.textContent);
-          }
-        }
-      }
-
-      if (!title) {
-        title = `Table_${detectedTables.length + 1}`;
-      }
-
-      // Extract Headers and Rows
-      let headers = [];
-      const rowsData = [];
-
-      rowElements.forEach((row, rowIndex) => {
-        const headerCells = Array.from(row.querySelectorAll('[role="columnheader"], th'));
-        const dataCells = Array.from(row.querySelectorAll('[role="cell"], [role="gridcell"], td'));
-
-        if (headerCells.length > 0 && headers.length === 0) {
-          headers = headerCells.map(c => cleanText(c.textContent)).filter(t => t.length > 0);
-        } else if (dataCells.length > 0) {
-          const rowValues = dataCells.map(c => cleanText(c.textContent));
-          // If the row has meaningful values
-          if (rowValues.some(val => val.length > 0)) {
-            rowsData.push(rowValues);
-          }
-        } else if (headers.length === 0 && rowIndex === 0) {
-          // If no formal headers, treat first row items as headers if they resemble labels
-          const rawItems = Array.from(row.children).map(c => cleanText(c.textContent)).filter(t => t.length > 0);
-          if (rawItems.length > 0) {
-            headers = rawItems;
-          }
-        } else {
-          // Fallback row items
-          const rawItems = Array.from(row.children).map(c => cleanText(c.textContent));
-          if (rawItems.some(v => v.length > 0)) {
-            rowsData.push(rawItems);
-          }
-        }
+  function findVisibleExportButton() {
+    const candidates = Array.from(document.querySelectorAll('button, [role="button"], a[role="button"]'))
+      .filter((el) => {
+        if (!isElementVisible(el)) return false;
+        if (el.closest('#gsc-downloader-floating-root')) return false;
+        if (el.getAttribute('aria-disabled') === 'true' || el.disabled) return false;
+        return true;
       });
 
-      // If headers count doesn't match row columns, synthesize generic headers
-      if (rowsData.length > 0) {
-        const maxCols = Math.max(...rowsData.map(r => r.length));
-        if (headers.length < maxCols) {
-          for (let i = headers.length; i < maxCols; i++) {
-            headers.push(`Column_${i + 1}`);
+    for (const btn of candidates) {
+      const aria = (
+        btn.getAttribute('aria-label') ||
+        btn.getAttribute('data-tooltip') ||
+        btn.getAttribute('title') ||
+        ''
+      ).toLowerCase();
+      const cleanTxt = getCleanElementText(btn).toLowerCase();
+      const rawTxt = (btn.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+
+      if (
+        aria === 'export' ||
+        aria.includes('export') ||
+        cleanTxt === 'export' ||
+        rawTxt === 'export' ||
+        rawTxt.endsWith('export')
+      ) {
+        return btn;
+      }
+    }
+
+    return null;
+  }
+
+  function findExportMenuItem(format = 'excel') {
+    const pattern = format === 'csv' ? /csv/i : /excel/i;
+
+    // 1. Check standard ARIA menu items that are currently visible
+    const menuItems = Array.from(document.querySelectorAll(
+      '[role="menuitem"], [role="option"], .goog-menuitem, .mat-menu-item, [role="menu"] [jsaction]'
+    )).filter((el) => isElementVisible(el));
+
+    for (const item of menuItems) {
+      const txt = getCleanElementText(item) || (item.textContent || '').trim();
+      if (pattern.test(txt) && txt.length < 60) {
+        return item.closest('[role="menuitem"], [role="option"], .goog-menuitem') || item;
+      }
+    }
+
+    // 2. Fallback: Check any visible leaf element with "Download Excel" / "Excel" / "Download CSV"
+    const allLeafs = Array.from(document.querySelectorAll('span, div, li, button, a'))
+      .filter((el) => isElementVisible(el) && el.children.length === 0 && !el.closest('#gsc-downloader-floating-root'));
+
+    for (const leaf of allLeafs) {
+      const txt = (leaf.textContent || '').trim();
+      if (pattern.test(txt) && txt.length < 40 && /(download|excel|csv)/i.test(txt)) {
+        return leaf.closest('[role="menuitem"], [role="option"], [role="button"], li, [jsaction]') || leaf;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Triggers GSC's native Export button on the currently visible view and selects
+   * "Download Excel" (or "Download CSV").
+   */
+  async function triggerSingleNativeExport(format = 'excel', meta = null) {
+    // Poll up to 4 seconds for the view's Export button to appear
+    let exportBtn = null;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      exportBtn = findVisibleExportButton();
+      if (exportBtn) break;
+      await sleep(200);
+    }
+
+    if (!exportBtn) {
+      return {
+        success: false,
+        skipped: true,
+        error: 'No active Export button found on this view'
+      };
+    }
+
+    // Inform background service worker so it can rename/organize the downloaded file
+    if (meta && typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+      try {
+        await chrome.runtime.sendMessage({
+          action: 'PREPARE_DOWNLOAD',
+          meta: { ...meta, format }
+        });
+      } catch (e) {}
+    }
+
+    // Start listening for Chrome download creation in parallel
+    let downloadStarted = false;
+    const downloadWaitPromise = new Promise((resolve) => {
+      if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+        chrome.runtime.sendMessage({ action: 'WAIT_FOR_DOWNLOAD', timeoutMs: 5500 }, (res) => {
+          if (res && res.started) downloadStarted = true;
+          resolve(res);
+        });
+      } else {
+        setTimeout(() => resolve({ started: false }), 2500);
+      }
+    });
+
+    // Click the Export button to open the dropdown menu (or trigger direct download)
+    dispatchRealClick(exportBtn);
+
+    // Wait up to 2.4 seconds for the Export dropdown menu item ("Download Excel" / "Download CSV")
+    let menuItem = null;
+    for (let i = 0; i < 24; i++) {
+      await sleep(100);
+      if (downloadStarted) {
+        // Direct download started without needing a dropdown menu
+        await sleep(500);
+        return { success: true, direct: true };
+      }
+      menuItem = findExportMenuItem(format);
+      if (menuItem) break;
+
+      // Retry native .click() at 700ms if menu hasn't appeared yet
+      if (i === 7) {
+        try { exportBtn.click(); } catch (e) {}
+      }
+    }
+
+    if (!menuItem) {
+      if (downloadStarted) {
+        return { success: true, direct: true };
+      }
+      return {
+        success: false,
+        error: `Export menu opened, but "${format === 'csv' ? 'Download CSV' : 'Download Excel'}" option was not found.`
+      };
+    }
+
+    // Wait 150ms for menu animation to stabilize, then click the menu item
+    await sleep(150);
+    dispatchRealClick(menuItem);
+
+    // Fallback: if menu item is still visible after 350ms and download hasn't started, call .click()
+    await sleep(350);
+    if (!downloadStarted && isElementVisible(menuItem)) {
+      try { menuItem.click(); } catch (e) {}
+      const innerSpan = menuItem.querySelector('span, div');
+      if (innerSpan) {
+        try { innerSpan.click(); } catch (e) {}
+      }
+    }
+
+    // Wait for Chrome to confirm the download started (or timeout after 5.5s)
+    await downloadWaitPromise;
+
+    // Close any lingering menu with Escape
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+    await sleep(450);
+
+    return { success: true };
+  }
+
+  // --- DISCOVERING SUB-REPORTS & DRILLDOWN ROWS ---
+
+  /**
+   * Finds the "View data about indexed pages" button on the Page Indexing overview.
+   */
+  function findIndexedPagesButton() {
+    const candidates = Array.from(document.querySelectorAll(
+      '[role="button"], a, button, [jsaction], [tabindex="0"], span, div'
+    )).filter((el) => isElementVisible(el) && !el.closest('#gsc-downloader-floating-root'));
+
+    for (const el of candidates) {
+      const txt = getCleanElementText(el);
+      if (/^view data about indexed pages$/i.test(txt)) {
+        return el.closest('[role="button"], a, button, [tabindex="0"], [jsaction]') || el;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Finds the Mobile and Desktop "Open report" buttons on the Core Web Vitals overview page.
+   */
+  function findCwvOpenReportButtons() {
+    const results = [];
+    const candidates = Array.from(document.querySelectorAll('a, button, [role="button"]'))
+      .filter((el) => isElementVisible(el) && !el.closest('#gsc-downloader-floating-root'));
+
+    for (const btn of candidates) {
+      const txt = getCleanElementText(btn);
+      const aria = (btn.getAttribute('aria-label') || '').toLowerCase();
+      if (/^open report$/i.test(txt) || aria.includes('open report')) {
+        // Determine whether this button belongs to the Mobile or Desktop card
+        const card = btn.closest('section, [role="region"], c-wiz > div div, .card') || btn.parentElement?.parentElement;
+        const cardText = card ? getCleanElementText(card) : '';
+        let device = 'Device';
+        if (/mobile/i.test(cardText) && !results.some((r) => r.device === 'Mobile')) {
+          device = 'Mobile';
+        } else if (/desktop/i.test(cardText) && !results.some((r) => r.device === 'Desktop')) {
+          device = 'Desktop';
+        } else {
+          device = results.length === 0 ? 'Mobile' : 'Desktop';
+        }
+        results.push({ device, element: btn });
+      }
+    }
+    return results;
+  }
+
+  /**
+   * Finds all clickable drilldown rows in tables on the current Overview page:
+   * - Page Indexing: "Why pages aren't indexed", "Improve page experience"
+   * - Crawl Stats: "By response", "By file type", "By purpose", "By Googlebot type"
+   * - Core Web Vitals (Mobile/Desktop): "Why URLs aren't considered good"
+   */
+  function findClickableTableRows(reportInfo) {
+    // Do not treat example URL lists inside a single drilldown as sub-report drilldowns
+    if (reportInfo.isDrilldown) return [];
+
+    const activeRoot = getActiveCWiz();
+    const rowElements = Array.from(activeRoot.querySelectorAll('tbody tr, tr[role="row"], [role="row"]'))
+      .filter((row) => {
+        if (!isElementVisible(row)) return false;
+        if (row.closest('thead')) return false;
+        if (row.querySelector('th, [role="columnheader"]')) return false;
+        if (row.closest('#gsc-downloader-floating-root')) return false;
+        return true;
+      });
+
+    const discoveredRows = [];
+    const seenKeys = new Set();
+
+    rowElements.forEach((row) => {
+      let cells = Array.from(row.querySelectorAll('td, [role="cell"], [role="gridcell"]'));
+      if (cells.length === 0) {
+        cells = Array.from(row.children);
+      }
+      if (cells.length < 2) return;
+
+      const firstCellText = getCleanElementText(cells[0]);
+      const lastCellText = getCleanElementText(cells[cells.length - 1]);
+
+      if (!firstCellText || firstCellText.length > 140) return;
+
+      // Skip table header labels or pagination rows
+      if (/^(reason|response|file type|purpose|googlebot type|metric|status|url|rows per page)$/i.test(firstCellText)) {
+        return;
+      }
+
+      // Skip Crawl Stats Host Status rows (Robots.txt fetch, DNS resolution, Server connectivity)
+      // because Host Status sub-views do not have an Export button in GSC.
+      if (/^(robots\.txt fetch|dns resolution|server connectivity)$/i.test(firstCellText)) {
+        return;
+      }
+
+      // Determine which table/section this row belongs to
+      let sectionTitle = '';
+      const tableContainer = row.closest('table, [role="table"], [role="grid"]') || row.parentElement;
+      if (tableContainer) {
+        let prev = tableContainer.previousElementSibling;
+        while (prev && !sectionTitle) {
+          if (/H[1-6]/.test(prev.tagName) || prev.matches('[role="heading"]')) {
+            sectionTitle = getCleanElementText(prev);
+          }
+          prev = prev.previousElementSibling;
+        }
+        if (!sectionTitle) {
+          const card = tableContainer.closest('section, [role="region"], div[jsmodel], div[jscontroller]');
+          if (card) {
+            const heading = card.querySelector('h2, h3, h4, [role="heading"]');
+            if (heading && isElementVisible(heading)) {
+              sectionTitle = getCleanElementText(heading);
+            }
           }
         }
+      }
 
-        detectedTables.push({
-          title,
-          headers,
-          rows: rowsData,
-          rowCount: rowsData.length
+      if (!sectionTitle) {
+        if (reportInfo.reportType === 'page-indexing') sectionTitle = 'Why pages aren\'t indexed';
+        else if (reportInfo.reportType === 'crawl-stats') sectionTitle = 'Breakdown';
+        else if (reportInfo.reportType === 'core-web-vitals') sectionTitle = reportInfo.subView || 'Issues';
+        else sectionTitle = 'Report Table';
+      }
+
+      const uniqueKey = `${sectionTitle}::${firstCellText}`;
+      if (seenKeys.has(uniqueKey)) return;
+      seenKeys.add(uniqueKey);
+
+      discoveredRows.push({
+        key: uniqueKey,
+        section: sectionTitle,
+        label: firstCellText,
+        count: lastCellText,
+        rowElement: row,
+        firstCell: cells[0]
+      });
+    });
+
+    return discoveredRows;
+  }
+
+  /**
+   * Builds the full list of native export tasks available from the current page.
+   */
+  function discoverExportTasks() {
+    const reportInfo = detectReportInfo();
+    if (!reportInfo.isGSC) return { reportInfo, tasks: [] };
+
+    const tasks = [];
+    const hasCurrentExportBtn = !!findVisibleExportButton();
+
+    // Case 1: User is already inside a specific Drilldown view
+    if (reportInfo.isDrilldown) {
+      if (hasCurrentExportBtn) {
+        tasks.push({
+          id: 'current-drilldown',
+          type: 'current-view',
+          section: 'Drilldown',
+          label: reportInfo.subView || reportInfo.pageTitle || 'Current Drilldown Report',
+          count: 'Active View'
         });
       }
-    });
-
-    return detectedTables;
-  }
-
-  // --- METRIC & SCORECARD SCRAPING ---
-
-  function scrapeSummaryMetrics(reportInfo) {
-    const metrics = [];
-
-    // Crawl Stats Specific Cards
-    if (reportInfo.reportType === 'crawl-stats') {
-      const cards = Array.from(document.querySelectorAll('.card, [role="region"], div[class*="metric"], div[class*="summary"]'));
-      cards.forEach(card => {
-        const text = card.innerText || '';
-        if (text.includes('Total crawl requests') || text.includes('Total download size') || text.includes('Average response time')) {
-          const lines = text.split('\n').map(l => cleanText(l)).filter(l => l.length > 0);
-          metrics.push({
-            label: lines[0] || 'Metric',
-            value: lines[1] || '',
-            extra: lines.slice(2).join(' | ')
-          });
-        }
-      });
-
-      // Host Status checks
-      const hostStatusItems = Array.from(document.querySelectorAll('div, tr, li')).filter(el => {
-        const t = el.textContent || '';
-        return t.includes('Robots.txt fetch') || t.includes('DNS resolution') || t.includes('Server connectivity');
-      });
-      hostStatusItems.slice(0, 3).forEach(el => {
-        const text = cleanText(el.textContent);
-        if (text && !metrics.some(m => m.label === text)) {
-          metrics.push({ label: 'Host Check', value: text });
-        }
-      });
+      return { reportInfo, tasks };
     }
 
-    // Page Indexing Specific Cards
+    // Case 2: Page Indexing Overview (/search-console/index)
     if (reportInfo.reportType === 'page-indexing') {
-      // Look for Indexed and Not Indexed scorecards
-      const elements = Array.from(document.querySelectorAll('div, button, [role="tab"]')).filter(el => {
-        const t = (el.textContent || '').trim();
-        return (t.includes('Not indexed') || t.includes('Indexed')) && /\d/.test(t);
+      if (hasCurrentExportBtn) {
+        tasks.push({
+          id: 'main-overview',
+          type: 'current-view',
+          section: 'Overview',
+          label: 'Page Indexing Overview (Summary)',
+          count: 'Main'
+        });
+      }
+
+      const indexedBtn = findIndexedPagesButton();
+      if (indexedBtn) {
+        tasks.push({
+          id: 'indexed-pages',
+          type: 'indexed-pages-btn',
+          section: 'Indexed',
+          label: 'Indexed Pages (View data about indexed pages)',
+          count: 'Drilldown'
+        });
+      }
+
+      const rows = findClickableTableRows(reportInfo);
+      rows.forEach((r) => {
+        tasks.push({
+          id: `row::${r.key}`,
+          type: 'table-row',
+          rowKey: r.key,
+          section: r.section,
+          label: r.label,
+          count: r.count
+        });
       });
 
-      elements.forEach(el => {
-        const clean = cleanText(el.textContent);
-        if (clean.length < 50 && !metrics.some(m => m.label === clean)) {
-          metrics.push({ label: 'Indexing Status', value: clean });
-        }
-      });
+      return { reportInfo, tasks };
     }
 
-    // Core Web Vitals Specific Cards
+    // Case 3: Crawl Stats Overview (/search-console/settings/crawl-stats)
+    if (reportInfo.reportType === 'crawl-stats') {
+      if (hasCurrentExportBtn) {
+        tasks.push({
+          id: 'main-overview',
+          type: 'current-view',
+          section: 'Overview',
+          label: 'Crawl Stats Overview (90-Day Charts)',
+          count: 'Main'
+        });
+      }
+
+      const rows = findClickableTableRows(reportInfo);
+      rows.forEach((r) => {
+        tasks.push({
+          id: `row::${r.key}`,
+          type: 'table-row',
+          rowKey: r.key,
+          section: r.section,
+          label: r.label,
+          count: r.count
+        });
+      });
+
+      return { reportInfo, tasks };
+    }
+
+    // Case 4: Core Web Vitals (/search-console/core-web-vitals)
     if (reportInfo.reportType === 'core-web-vitals') {
-      const elements = Array.from(document.querySelectorAll('div, section')).filter(el => {
-        const t = el.textContent || '';
-        return (t.includes('Poor URLs') || t.includes('Need improvement') || t.includes('Good URLs')) && /\d/.test(t);
-      });
-
-      elements.forEach(el => {
-        const clean = cleanText(el.textContent);
-        if (clean.length < 80 && !metrics.some(m => m.value === clean)) {
-          metrics.push({ label: 'CWV Status', value: clean });
-        }
-      });
-    }
-
-    // Generic Metric Card Sweeper if none caught
-    if (metrics.length === 0) {
-      const genericCards = Array.from(document.querySelectorAll('[class*="scorecard"], [class*="summary-card"], [class*="stat-card"]'));
-      genericCards.forEach(c => {
-        const label = cleanText(c.querySelector('h2, h3, .label, .title')?.textContent || '');
-        const val = cleanText(c.querySelector('.value, .count, .number')?.textContent || '');
-        if (label || val) {
-          metrics.push({ label: label || 'Metric', value: val || cleanText(c.textContent) });
-        }
-      });
-    }
-
-    return metrics;
-  }
-
-  // --- NATIVE EXPORT AUTOMATION ---
-
-  function findNativeExportButton() {
-    // Look for button with Export label or icon
-    const candidates = Array.from(document.querySelectorAll(
-      'button[aria-label*="Export" i], button[aria-label*="export" i], button[title*="Export" i], [role="button"][aria-label*="Export" i]'
-    ));
-
-    if (candidates.length > 0) return candidates[0];
-
-    // Search by text content
-    const buttons = Array.from(document.querySelectorAll('button, [role="button"], span'));
-    const textMatch = buttons.find(b => {
-      const text = (b.textContent || '').trim().toLowerCase();
-      return text === 'export' || text === 'export table' || text === 'export data';
-    });
-
-    return textMatch ? (textMatch.closest('button, [role="button"]') || textMatch) : null;
-  }
-
-  async function triggerNativeExport(format = 'csv') {
-    const exportBtn = findNativeExportButton();
-    if (!exportBtn) {
-      return { success: false, error: 'Native Export button not found on this page' };
-    }
-
-    // Click Export Button
-    exportBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    exportBtn.click();
-    showToast('Opening native export menu...', 'info');
-
-    // Wait for dropdown menu to appear
-    await new Promise(resolve => setTimeout(resolve, 600));
-
-    // Find format menu items (Google Sheets, Microsoft Excel, Download CSV)
-    const menuItems = Array.from(document.querySelectorAll(
-      '[role="menuitem"], .mat-menu-item, button, div[role="button"]'
-    ));
-
-    const targetFormat = format.toLowerCase();
-    let chosenItem = null;
-
-    if (targetFormat === 'csv') {
-      chosenItem = menuItems.find(el => /download csv|csv/i.test(el.textContent || ''));
-    } else if (targetFormat === 'excel' || targetFormat === 'xlsx') {
-      chosenItem = menuItems.find(el => /excel|microsoft excel/i.test(el.textContent || ''));
-    } else if (targetFormat === 'sheets') {
-      chosenItem = menuItems.find(el => /google sheets|sheets/i.test(el.textContent || ''));
-    }
-
-    if (!chosenItem) {
-      // Fallback: pick any item containing "CSV"
-      chosenItem = menuItems.find(el => /csv/i.test(el.textContent || ''));
-    }
-
-    if (chosenItem) {
-      chosenItem.click();
-      showToast('Native export triggered! Download will start shortly.', 'success');
-      return { success: true, message: 'Native export triggered' };
-    } else {
-      showToast('Export menu opened. Please choose your format.', 'info');
-      return { success: true, message: 'Export menu opened' };
-    }
-  }
-
-  // --- CSV GENERATOR ---
-
-  function convertTableToCSV(table, reportInfo) {
-    const lines = [];
-
-    // Optional metadata header
-    lines.push(`# Google Search Console Export`);
-    lines.push(`# Report: ${reportInfo.reportName} - ${table.title}`);
-    lines.push(`# Property: ${reportInfo.property || 'N/A'}`);
-    lines.push(`# Exported: ${new Date().toLocaleString()}`);
-    lines.push(``);
-
-    // Escape cell for CSV
-    const escapeCell = (val) => {
-      const str = String(val === undefined || val === null ? '' : val);
-      if (str.includes(',') || str.includes('"') || str.includes('\n') || str.includes('\r')) {
-        return `"${str.replace(/"/g, '""')}"`;
+      const cwvButtons = findCwvOpenReportButtons();
+      if (cwvButtons.length > 0 && reportInfo.subView === 'Overview') {
+        cwvButtons.forEach((b) => {
+          tasks.push({
+            id: `cwv::${b.device}`,
+            type: 'cwv-device',
+            device: b.device,
+            section: 'Core Web Vitals',
+            label: `${b.device} Report (+ Issue Drilldowns)`,
+            count: 'Full Report'
+          });
+        });
+        return { reportInfo, tasks };
       }
-      return str;
+
+      // Already inside Mobile or Desktop report
+      if (hasCurrentExportBtn) {
+        tasks.push({
+          id: 'main-overview',
+          type: 'current-view',
+          section: reportInfo.subView,
+          label: `${reportInfo.subView} Summary`,
+          count: 'Main'
+        });
+      }
+
+      const rows = findClickableTableRows(reportInfo);
+      rows.forEach((r) => {
+        tasks.push({
+          id: `row::${r.key}`,
+          type: 'table-row',
+          rowKey: r.key,
+          section: r.section,
+          label: r.label,
+          count: r.count
+        });
+      });
+
+      return { reportInfo, tasks };
+    }
+
+    // Case 5: Other GSC Report with an Export button (e.g. Performance)
+    if (hasCurrentExportBtn) {
+      tasks.push({
+        id: 'main-overview',
+        type: 'current-view',
+        section: reportInfo.reportName,
+        label: `${reportInfo.reportName} (${reportInfo.subView})`,
+        count: 'Active View'
+      });
+    }
+
+    return { reportInfo, tasks };
+  }
+
+  // --- SPA VIEW NAVIGATION & STATE MANAGEMENT ---
+
+  function captureViewState() {
+    return {
+      url: window.location.href,
+      cWiz: getActiveCWiz(),
+      exportBtn: findVisibleExportButton(),
+      backBtnVisible: !!isBackButtonVisible()
     };
-
-    // Header row
-    if (table.headers && table.headers.length > 0) {
-      lines.push(table.headers.map(escapeCell).join(','));
-    }
-
-    // Data rows
-    if (table.rows && table.rows.length > 0) {
-      table.rows.forEach(row => {
-        lines.push(row.map(escapeCell).join(','));
-      });
-    }
-
-    // UTF-8 BOM prefix (\uFEFF) for seamless Microsoft Excel rendering
-    return '\uFEFF' + lines.join('\r\n');
   }
 
-  function convertMetricsToCSV(metrics, reportInfo) {
-    const lines = [];
-    lines.push(`# Google Search Console - Key Summary Metrics`);
-    lines.push(`# Report: ${reportInfo.reportName}`);
-    lines.push(`# Property: ${reportInfo.property || 'N/A'}`);
-    lines.push(`# Exported: ${new Date().toLocaleString()}`);
-    lines.push(``);
-    lines.push(`Metric,Value,Details`);
+  async function waitForViewChange(prevState, timeoutMs = 7000) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      await sleep(200);
+      const currentUrl = window.location.href;
+      const currentCWiz = getActiveCWiz();
+      const currentExportBtn = findVisibleExportButton();
+      const hasBackBtn = !!isBackButtonVisible();
 
-    const escapeCell = (val) => {
-      const str = String(val === undefined || val === null ? '' : val);
-      if (str.includes(',') || str.includes('"') || str.includes('\n')) {
-        return `"${str.replace(/"/g, '""')}"`;
+      const urlChanged = currentUrl !== prevState.url;
+      const cWizChanged = currentCWiz !== prevState.cWiz;
+      const exportBtnChanged = currentExportBtn && currentExportBtn !== prevState.exportBtn;
+      const backBtnAppeared = !prevState.backBtnVisible && hasBackBtn;
+
+      if (urlChanged || cWizChanged || exportBtnChanged || backBtnAppeared) {
+        // Give GSC's new view 600ms to finish rendering its toolbar & Export button
+        await sleep(600);
+        return true;
       }
-      return str;
-    };
-
-    metrics.forEach(m => {
-      lines.push([escapeCell(m.label), escapeCell(m.value), escapeCell(m.extra || '')].join(','));
-    });
-
-    return '\uFEFF' + lines.join('\r\n');
+    }
+    return false;
   }
 
-  // --- DOWNLOAD HELPER ---
-
-  function triggerBrowserDownload(blob, filename) {
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    setTimeout(() => {
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    }, 1000);
-  }
-
-  function sanitizeFilename(name) {
-    return name.replace(/[^a-zA-Z0-9_\-\.]/g, '_').replace(/_+/g, '_');
-  }
-
-  function generateFilenamePrefix(reportInfo) {
-    const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-    const propSlug = (reportInfo.property || 'gsc')
-      .replace(/https?:\/\//i, '')
-      .replace(/sc-domain:/i, '')
-      .replace(/[^a-zA-Z0-9]/g, '_')
-      .slice(0, 25);
-    const reportSlug = reportInfo.reportType || 'report';
-    return `GSC_${reportSlug}_${propSlug}_${dateStr}`;
-  }
-
-  // --- FULL REPORT BUNDLE EXPORT (ZIP / CSV / JSON) ---
-
-  async function exportAllData(options = {}) {
-    const format = options.format || 'zip'; // 'zip', 'csv', 'json'
-    const reportInfo = detectReportInfo();
-    const tables = scrapeAllTables();
-    const metrics = scrapeSummaryMetrics(reportInfo);
-
-    if (tables.length === 0 && metrics.length === 0) {
-      showToast('No table or metric data found on this page.', 'error');
-      return { success: false, error: 'No data detected' };
+  async function returnToViewState(targetState, timeoutMs = 7000) {
+    if (window.location.href === targetState.url && getActiveCWiz() === targetState.cWiz) {
+      return true;
     }
 
-    const filePrefix = generateFilenamePrefix(reportInfo);
-    showToast(`Exporting ${tables.length} table(s)...`, 'info');
+    window.history.back();
 
-    // JSON Export
-    if (format === 'json') {
-      const jsonData = {
-        metadata: reportInfo,
-        summaryMetrics: metrics,
-        tables: tables
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      await sleep(200);
+      if (window.location.href === targetState.url && getActiveCWiz() === targetState.cWiz) {
+        await sleep(450);
+        return true;
+      }
+      // If after 2.5 seconds history.back() hasn't returned, try clicking GSC's Back button
+      if (Date.now() - start > 2500) {
+        const backBtn = isBackButtonVisible();
+        if (backBtn && !targetState.backBtnVisible) {
+          dispatchRealClick(backBtn);
+          await sleep(600);
+        }
+      }
+    }
+
+    await sleep(400);
+    return true;
+  }
+
+  /**
+   * Clicks a drilldown row and ensures GSC navigates to the drilldown view.
+   */
+  async function openDrilldownRow(rowItem, prevState) {
+    const { rowElement, firstCell } = rowItem;
+    rowElement.scrollIntoView({ block: 'center', inline: 'center' });
+    await sleep(150);
+
+    // Check if there is a link inside the row
+    const link = rowElement.querySelector('a[href]');
+    const primaryTarget = link || firstCell || rowElement;
+
+    dispatchRealClick(primaryTarget);
+
+    // Wait up to 600ms; if view hasn't started changing, also trigger native .click() on cell and row
+    await sleep(450);
+    if (window.location.href === prevState.url && getActiveCWiz() === prevState.cWiz) {
+      try { firstCell.click(); } catch (e) {}
+      try { rowElement.click(); } catch (e) {}
+    }
+
+    return waitForViewChange(prevState, 7000);
+  }
+
+  // --- BATCH AUTOMATION RUNNER ---
+
+  async function runBatchNativeExport(options = {}) {
+    if (isBatchRunning) {
+      return { success: false, error: 'An export batch is already in progress.' };
+    }
+
+    const format = options.format || 'excel'; // 'excel' or 'csv'
+    const selectedTaskIds = options.selectedTaskIds || null; // null = run all discovered tasks
+    const currentViewOnly = options.currentViewOnly === true;
+
+    const { reportInfo, tasks: allTasks } = discoverExportTasks();
+
+    if (currentViewOnly) {
+      showProgressPanel(1, 1, `Exporting ${reportInfo.reportName} (${format.toUpperCase()})...`);
+      const res = await triggerSingleNativeExport(format, {
+        property: reportInfo.property,
+        reportName: reportInfo.reportName,
+        section: reportInfo.subView,
+        label: reportInfo.pageTitle || reportInfo.subView || 'Current_View',
+        index: 1
+      });
+      hideProgressPanel();
+      if (res.success) {
+        showToast(`Exported current view (${format.toUpperCase()})!`, 'success');
+      } else {
+        showToast(res.error || 'Export button not available on this view.', 'error');
+      }
+      return res;
+    }
+
+    const tasksToRun = selectedTaskIds
+      ? allTasks.filter((t) => selectedTaskIds.includes(t.id))
+      : allTasks;
+
+    if (tasksToRun.length === 0) {
+      showToast('No exportable reports or drilldowns found on this page.', 'error');
+      return { success: false, error: 'No exportable items found on this page.' };
+    }
+
+    isBatchRunning = true;
+    cancelBatchRequested = false;
+    let exportedCount = 0;
+    let skippedCount = 0;
+    let fileIndex = 1;
+
+    try {
+      for (let i = 0; i < tasksToRun.length; i++) {
+        if (cancelBatchRequested) {
+          showToast(`Export stopped (${exportedCount} file(s) downloaded).`, 'info');
+          break;
+        }
+
+        const task = tasksToRun[i];
+        showProgressPanel(i + 1, tasksToRun.length, `${task.section}: ${task.label}`);
+
+        // 1. Current View Export (e.g., Main Crawl Stats overview or active drilldown)
+        if (task.type === 'current-view') {
+          const res = await triggerSingleNativeExport(format, {
+            property: reportInfo.property,
+            reportName: reportInfo.reportName,
+            section: task.section,
+            label: task.label,
+            index: fileIndex
+          });
+          if (res.success) {
+            exportedCount++;
+            fileIndex++;
+          } else {
+            skippedCount++;
+          }
+          await sleep(400);
+          continue;
+        }
+
+        // 2. "View data about indexed pages" button on Page Indexing Overview
+        if (task.type === 'indexed-pages-btn') {
+          const overviewState = captureViewState();
+          const indexedBtn = findIndexedPagesButton();
+          if (!indexedBtn) {
+            skippedCount++;
+            continue;
+          }
+
+          dispatchRealClick(indexedBtn);
+          await sleep(400);
+          if (window.location.href === overviewState.url && getActiveCWiz() === overviewState.cWiz) {
+            try { indexedBtn.click(); } catch (e) {}
+          }
+
+          const changed = await waitForViewChange(overviewState, 7000);
+          if (changed) {
+            const res = await triggerSingleNativeExport(format, {
+              property: reportInfo.property,
+              reportName: reportInfo.reportName,
+              section: 'Indexed_Pages',
+              label: 'Indexed_Pages',
+              index: fileIndex
+            });
+            if (res.success) {
+              exportedCount++;
+              fileIndex++;
+            } else {
+              skippedCount++;
+            }
+            await returnToViewState(overviewState);
+          } else {
+            skippedCount++;
+          }
+          continue;
+        }
+
+        // 3. Table Row Drilldown (Page Indexing reasons, Crawl Stats breakdowns, CWV issues)
+        if (task.type === 'table-row') {
+          const overviewState = captureViewState();
+          const currentRows = findClickableTableRows(detectReportInfo());
+          const matchingRow =
+            currentRows.find((r) => r.key === task.rowKey) ||
+            currentRows.find((r) => r.label === task.label);
+
+          if (!matchingRow) {
+            skippedCount++;
+            continue;
+          }
+
+          const navigated = await openDrilldownRow(matchingRow, overviewState);
+          if (navigated) {
+            const res = await triggerSingleNativeExport(format, {
+              property: reportInfo.property,
+              reportName: reportInfo.reportName,
+              section: task.section,
+              label: task.label,
+              index: fileIndex
+            });
+            if (res.success) {
+              exportedCount++;
+              fileIndex++;
+            } else {
+              skippedCount++;
+            }
+            await returnToViewState(overviewState);
+          } else {
+            skippedCount++;
+          }
+          continue;
+        }
+
+        // 4. Core Web Vitals Device Report (Mobile / Desktop) + its inner issue drilldowns
+        if (task.type === 'cwv-device') {
+          const cwvOverviewState = captureViewState();
+          const deviceBtns = findCwvOpenReportButtons();
+          const targetBtnObj = deviceBtns.find((b) => b.device === task.device);
+
+          if (!targetBtnObj) {
+            skippedCount++;
+            continue;
+          }
+
+          dispatchRealClick(targetBtnObj.element);
+          await sleep(400);
+          if (window.location.href === cwvOverviewState.url && getActiveCWiz() === cwvOverviewState.cWiz) {
+            try { targetBtnObj.element.click(); } catch (e) {}
+          }
+
+          const enteredDeviceReport = await waitForViewChange(cwvOverviewState, 7000);
+          if (enteredDeviceReport) {
+            // Export the Device Summary Report
+            showProgressPanel(i + 1, tasksToRun.length, `CWV ${task.device}: Summary Report`);
+            const summaryRes = await triggerSingleNativeExport(format, {
+              property: reportInfo.property,
+              reportName: 'Core_Web_Vitals',
+              section: task.device,
+              label: `${task.device}_Summary`,
+              index: fileIndex
+            });
+            if (summaryRes.success) {
+              exportedCount++;
+              fileIndex++;
+            }
+
+            // Also export each issue drilldown row inside this Device Report
+            const deviceState = captureViewState();
+            const issueRows = findClickableTableRows({ ...reportInfo, isDrilldown: false, subView: task.device });
+
+            for (let j = 0; j < issueRows.length; j++) {
+              if (cancelBatchRequested) break;
+              const issueTarget = issueRows[j];
+              showProgressPanel(
+                i + 1,
+                tasksToRun.length,
+                `CWV ${task.device} (${j + 1}/${issueRows.length}): ${issueTarget.label}`
+              );
+
+              const freshRows = findClickableTableRows({ ...reportInfo, isDrilldown: false, subView: task.device });
+              const rowToClick = freshRows.find((r) => r.label === issueTarget.label) || freshRows[j];
+              if (!rowToClick) continue;
+
+              const enteredIssue = await openDrilldownRow(rowToClick, deviceState);
+              if (enteredIssue) {
+                const issueRes = await triggerSingleNativeExport(format, {
+                  property: reportInfo.property,
+                  reportName: 'Core_Web_Vitals',
+                  section: task.device,
+                  label: issueTarget.label,
+                  index: fileIndex
+                });
+                if (issueRes.success) {
+                  exportedCount++;
+                  fileIndex++;
+                }
+                await returnToViewState(deviceState);
+              }
+            }
+
+            // Return back to the CWV Overview page
+            await returnToViewState(cwvOverviewState);
+          } else {
+            skippedCount++;
+          }
+          continue;
+        }
+      }
+
+      hideProgressPanel();
+      if (!cancelBatchRequested) {
+        showToast(
+          `Finished! Downloaded ${exportedCount} ${format === 'csv' ? 'CSV (.zip)' : 'Excel (.xlsx)'} file(s).`,
+          exportedCount > 0 ? 'success' : 'error'
+        );
+      }
+
+      return {
+        success: exportedCount > 0,
+        exportedCount,
+        skippedCount
       };
-      const jsonBlob = new Blob([JSON.stringify(jsonData, null, 2)], { type: 'application/json' });
-      triggerBrowserDownload(jsonBlob, `${filePrefix}_complete_data.json`);
-      showToast('JSON export downloaded!', 'success');
-      return { success: true, count: tables.length };
+    } finally {
+      isBatchRunning = false;
+      batchProgressState = null;
+      hideProgressPanel();
     }
-
-    // Single / Multiple CSV Export
-    if (format === 'csv') {
-      if (metrics.length > 0) {
-        const metricsCSV = convertMetricsToCSV(metrics, reportInfo);
-        triggerBrowserDownload(new Blob([metricsCSV], { type: 'text/csv;charset=utf-8' }), `${filePrefix}_summary_metrics.csv`);
-      }
-      tables.forEach(table => {
-        const csvContent = convertTableToCSV(table, reportInfo);
-        const tableNameSlug = sanitizeFilename(table.title.toLowerCase());
-        triggerBrowserDownload(new Blob([csvContent], { type: 'text/csv;charset=utf-8' }), `${filePrefix}_${tableNameSlug}.csv`);
-      });
-      showToast(`${tables.length} CSV file(s) downloaded!`, 'success');
-      return { success: true, count: tables.length };
-    }
-
-    // ZIP Bundle Export (Default 1-Click Action)
-    if (format === 'zip') {
-      if (typeof window.ZipWriter === 'undefined') {
-        showToast('ZipWriter library missing, falling back to CSV', 'error');
-        return exportAllData({ format: 'csv' });
-      }
-
-      const zip = new window.ZipWriter();
-
-      // 1. Add Summary README
-      const readmeLines = [
-        `======================================================`,
-        `Google Search Console - Non-API Data Export Bundle`,
-        `======================================================`,
-        `Report:       ${reportInfo.reportName} (${reportInfo.subView || 'Overview'})`,
-        `Property:     ${reportInfo.property || 'N/A'}`,
-        `Date & Time:  ${new Date().toLocaleString()}`,
-        `Page URL:     ${reportInfo.url}`,
-        `Total Tables: ${tables.length}`,
-        `Total Metrics:${metrics.length}`,
-        `======================================================\n`,
-        `Tables Included:`,
-        ...tables.map((t, i) => `  ${i + 1}. ${t.title} (${t.rowCount} rows)`),
-        `\nNote: All CSV files are UTF-8 encoded with BOM for full compatibility with Excel and Sheets.`
-      ];
-      zip.addFile('README_export_summary.txt', readmeLines.join('\n'));
-
-      // 2. Add Summary Metrics CSV
-      if (metrics.length > 0) {
-        const metricsCSV = convertMetricsToCSV(metrics, reportInfo);
-        zip.addFile('summary_metrics.csv', metricsCSV);
-      }
-
-      // 3. Add each table as individual CSV
-      tables.forEach((table, index) => {
-        const csvContent = convertTableToCSV(table, reportInfo);
-        const nameSlug = sanitizeFilename(table.title.toLowerCase()) || `table_${index + 1}`;
-        zip.addFile(`${String(index + 1).padStart(2, '0')}_${nameSlug}.csv`, csvContent);
-      });
-
-      // 4. Add Consolidated JSON
-      const fullJson = {
-        metadata: reportInfo,
-        summaryMetrics: metrics,
-        tables: tables
-      };
-      zip.addFile('all_report_data.json', JSON.stringify(fullJson, null, 2));
-
-      // Generate and Download ZIP
-      const zipBlob = zip.generateBlob();
-      triggerBrowserDownload(zipBlob, `${filePrefix}.zip`);
-      showToast(`ZIP bundle downloaded (${tables.length} tables + JSON)!`, 'success');
-
-      return { success: true, count: tables.length, filename: `${filePrefix}.zip` };
-    }
-
-    return { success: false, error: 'Unknown format' };
   }
 
-  // --- FLOATING IN-PAGE BUTTON ---
+  // --- IN-PAGE UI: FLOATING BUTTON, PROGRESS PANEL & TOAST ---
+
+  function showProgressPanel(current, total, stepLabel) {
+    batchProgressState = { current, total, stepLabel };
+    let panel = document.getElementById('gsc-downloader-progress-panel');
+    if (!panel) {
+      panel = document.createElement('div');
+      panel.id = 'gsc-downloader-progress-panel';
+      panel.className = 'gsc-downloader-progress-panel';
+      panel.innerHTML = `
+        <div class="gsc-downloader-progress-header">
+          <div class="gsc-downloader-progress-title">
+            <div class="gsc-downloader-spinner"></div>
+            <span id="gsc-prog-title-text">Exporting GSC Reports...</span>
+          </div>
+          <button id="gsc-prog-stop-btn" class="gsc-downloader-stop-btn">Stop</button>
+        </div>
+        <div id="gsc-prog-step-text" class="gsc-downloader-progress-step">Preparing...</div>
+        <div class="gsc-downloader-progress-bar-bg">
+          <div id="gsc-prog-bar-fill" class="gsc-downloader-progress-bar-fill"></div>
+        </div>
+      `;
+      document.body.appendChild(panel);
+
+      panel.querySelector('#gsc-prog-stop-btn').addEventListener('click', () => {
+        cancelBatchRequested = true;
+        panel.querySelector('#gsc-prog-step-text').textContent = 'Stopping after current step...';
+      });
+    }
+
+    panel.style.display = 'flex';
+    const pct = total > 0 ? Math.round((current / total) * 100) : 50;
+    panel.querySelector('#gsc-prog-title-text').textContent = `Exporting (${current} of ${total})`;
+    panel.querySelector('#gsc-prog-step-text').textContent = stepLabel;
+    panel.querySelector('#gsc-prog-bar-fill').style.width = `${pct}%`;
+  }
+
+  function hideProgressPanel() {
+    const panel = document.getElementById('gsc-downloader-progress-panel');
+    if (panel) {
+      panel.style.display = 'none';
+    }
+  }
 
   function injectFloatingButton() {
     if (document.getElementById('gsc-downloader-floating-root')) return;
-
     const reportInfo = detectReportInfo();
     if (!reportInfo.isGSC) return;
 
@@ -562,23 +1029,28 @@
 
     const btn = document.createElement('button');
     btn.className = 'gsc-downloader-floating-btn';
-    btn.title = '1-Click Export GSC Report Data (.ZIP)';
+    btn.title = '1-Click Export All Report & Drilldown Files (Excel)';
     btn.innerHTML = `
       <svg viewBox="0 0 24 24">
         <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
       </svg>
-      <span>1-Click Export Data</span>
+      <span>1-Click Export Report (Excel)</span>
     `;
 
     btn.addEventListener('click', () => {
-      exportAllData({ format: 'zip' });
+      if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+        chrome.storage.local.get({ exportFormat: 'excel' }, (res) => {
+          runBatchNativeExport({ format: res.exportFormat || 'excel' });
+        });
+      } else {
+        runBatchNativeExport({ format: 'excel' });
+      }
     });
 
     container.appendChild(btn);
     document.body.appendChild(container);
 
-    // Check user preference for floating button visibility
-    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+    if (typeof chrome !== 'undefined' && chrome.storage?.local) {
       chrome.storage.local.get({ showFloatingButton: true }, (res) => {
         if (!res.showFloatingButton) {
           container.style.display = 'none';
@@ -586,8 +1058,6 @@
       });
     }
   }
-
-  // --- TOAST NOTIFICATIONS ---
 
   function showToast(message, type = 'info') {
     let toast = document.getElementById('gsc-downloader-toast');
@@ -604,10 +1074,10 @@
     clearTimeout(toast.__timer);
     toast.__timer = setTimeout(() => {
       toast.classList.remove('gsc-toast-visible');
-    }, 3500);
+    }, 4000);
   }
 
-  // --- CHROME EXTENSION MESSAGE LISTENER ---
+  // --- MESSAGE LISTENER FOR POPUP ---
 
   if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
     chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
@@ -619,32 +1089,31 @@
       }
 
       if (action === 'GET_STATUS') {
-        const reportInfo = detectReportInfo();
-        const tables = scrapeAllTables();
-        const metrics = scrapeSummaryMetrics(reportInfo);
-        const nativeExportAvailable = !!findNativeExportButton();
-
+        const { reportInfo, tasks } = discoverExportTasks();
         sendResponse({
           reportInfo,
-          metrics,
-          tablesCount: tables.length,
-          tablesPreview: tables.map(t => ({ title: t.title, rows: t.rowCount, headers: t.headers })),
-          nativeExportAvailable
+          tasks,
+          nativeExportAvailable: !!findVisibleExportButton(),
+          isBatchRunning,
+          batchProgressState
         });
         return true;
       }
 
-      if (action === 'TRIGGER_EXPORT') {
-        exportAllData({ format: request.format || 'zip' })
-          .then(result => sendResponse(result))
-          .catch(err => sendResponse({ success: false, error: err.message }));
+      if (action === 'START_BATCH_EXPORT') {
+        runBatchNativeExport({
+          format: request.format || 'excel',
+          selectedTaskIds: request.selectedTaskIds || null,
+          currentViewOnly: request.currentViewOnly === true
+        })
+          .then((result) => sendResponse(result))
+          .catch((err) => sendResponse({ success: false, error: err.message }));
         return true;
       }
 
-      if (action === 'TRIGGER_NATIVE_EXPORT') {
-        triggerNativeExport(request.format || 'csv')
-          .then(result => sendResponse(result))
-          .catch(err => sendResponse({ success: false, error: err.message }));
+      if (action === 'STOP_BATCH_EXPORT') {
+        cancelBatchRequested = true;
+        sendResponse({ success: true });
         return true;
       }
 
@@ -684,12 +1153,9 @@
     });
   }
 
-  // Inject floating button when document is ready
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', injectFloatingButton);
   } else {
     injectFloatingButton();
   }
-
 })();
-

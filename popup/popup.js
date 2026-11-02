@@ -1,23 +1,24 @@
 /**
- * GSC non-API Data Downloader - Popup Controller
- * Connects UI actions to content script data extraction engine.
+ * GSC non-API Data Downloader - Popup Controller (v2.0.0)
+ * Controls native report & drilldown export selection and format preferences.
  */
 
 document.addEventListener('DOMContentLoaded', async () => {
-  // DOM Elements
   const statusPill = document.getElementById('statusPill');
   const statusText = document.getElementById('statusText');
   const propertyValue = document.getElementById('propertyValue');
   const reportViewValue = document.getElementById('reportViewValue');
-  const tablesBadge = document.getElementById('tablesBadge');
-  const metricsChipContainer = document.getElementById('metricsChipContainer');
-  const tablesPreviewContainer = document.getElementById('tablesPreviewContainer');
+  const fmtExcel = document.getElementById('fmtExcel');
+  const fmtCsv = document.getElementById('fmtCsv');
 
-  const btnExportZip = document.getElementById('btnExportZip');
-  const btnExportCsv = document.getElementById('btnExportCsv');
-  const btnExportJson = document.getElementById('btnExportJson');
-  const btnNativeExport = document.getElementById('btnNativeExport');
-  const nativeExportStatus = document.getElementById('nativeExportStatus');
+  const btnToggleAll = document.getElementById('btnToggleAll');
+  const tasksBadge = document.getElementById('tasksBadge');
+  const tasksChecklistContainer = document.getElementById('tasksChecklistContainer');
+
+  const btnExportBatch = document.getElementById('btnExportBatch');
+  const btnExportBatchTitle = document.getElementById('btnExportBatchTitle');
+  const btnExportCurrentOnly = document.getElementById('btnExportCurrentOnly');
+  const btnCurrentOnlyText = document.getElementById('btnCurrentOnlyText');
 
   const jumpIndexing = document.getElementById('jumpIndexing');
   const jumpCrawlStats = document.getElementById('jumpCrawlStats');
@@ -25,30 +26,44 @@ document.addEventListener('DOMContentLoaded', async () => {
   const toggleFloatingBtn = document.getElementById('toggleFloatingBtn');
   const appVersion = document.getElementById('appVersion');
 
-  const progressOverlay = document.getElementById('progressOverlay');
-  const progressMessage = document.getElementById('progressMessage');
-
-  // Display version dynamically from manifest
-  if (appVersion && chrome.runtime?.getManifest) {
-    appVersion.textContent = 'v' + chrome.runtime.getManifest().version;
-  }
-
   let activeTab = null;
   let activeResourceId = '';
+  let selectedFormat = 'excel';
+  let discoveredTasks = [];
 
-  // Show progress modal
-  function showProgress(msg) {
-    progressMessage.textContent = msg;
-    progressOverlay.classList.remove('hidden');
-  }
-
-  function hideProgress() {
-    progressOverlay.classList.add('hidden');
+  if (appVersion && chrome.runtime?.getManifest) {
+    appVersion.textContent = 'v' + chrome.runtime.getManifest().version;
   }
 
   function isGscUrl(url) {
     return Boolean(url && url.includes('search.google.com') && url.includes('search-console'));
   }
+
+  function setFormatUI(format) {
+    selectedFormat = format === 'csv' ? 'csv' : 'excel';
+    fmtExcel.classList.toggle('active', selectedFormat === 'excel');
+    fmtCsv.classList.toggle('active', selectedFormat === 'csv');
+
+    const labelSuffix = selectedFormat === 'csv' ? 'CSV' : 'Excel';
+    btnExportBatchTitle.textContent = `1-Click Export All Report Files (${labelSuffix})`;
+    btnCurrentOnlyText.textContent = `Export Current View Only (${labelSuffix})`;
+  }
+
+  // Load saved preferences
+  chrome.storage.local.get({ showFloatingButton: true, exportFormat: 'excel' }, (res) => {
+    toggleFloatingBtn.checked = res.showFloatingButton;
+    setFormatUI(res.exportFormat);
+  });
+
+  fmtExcel.addEventListener('click', () => {
+    setFormatUI('excel');
+    chrome.storage.local.set({ exportFormat: 'excel' });
+  });
+
+  fmtCsv.addEventListener('click', () => {
+    setFormatUI('csv');
+    chrome.storage.local.set({ exportFormat: 'csv' });
+  });
 
   // Get current active tab
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -59,28 +74,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     return;
   }
 
-  // Parse resource_id from active tab URL
   try {
     const urlObj = new URL(activeTab.url);
     activeResourceId = urlObj.searchParams.get('resource_id') || '';
-  } catch (e) {
-    console.warn('Could not parse tab URL', e);
-  }
+  } catch (e) {}
 
-  // Ensure content script is injected in tab
   try {
     await chrome.runtime.sendMessage({ action: 'ENSURE_INJECTED', tabId: activeTab.id });
-  } catch (e) {
-    console.log('Injection check passed or handled');
-  }
+  } catch (e) {}
 
-  // Query tab for status
   fetchTabStatus();
-
-  // Load user settings
-  chrome.storage.local.get({ showFloatingButton: true }, (res) => {
-    toggleFloatingBtn.checked = res.showFloatingButton;
-  });
 
   toggleFloatingBtn.addEventListener('change', () => {
     const isChecked = toggleFloatingBtn.checked;
@@ -88,94 +91,78 @@ document.addEventListener('DOMContentLoaded', async () => {
     chrome.tabs.sendMessage(activeTab.id, { action: 'TOGGLE_FLOATING_BTN', show: isChecked });
   });
 
-  // --- TAB STATUS QUERY ---
-
   function fetchTabStatus() {
     chrome.tabs.sendMessage(activeTab.id, { action: 'GET_STATUS' }, (response) => {
       if (chrome.runtime.lastError || !response) {
-        // Tab might still be initializing
-        setTimeout(retryStatusQuery, 800);
+        setTimeout(() => {
+          chrome.tabs.sendMessage(activeTab.id, { action: 'GET_STATUS' }, (retryRes) => {
+            if (chrome.runtime.lastError || !retryRes) {
+              renderFallbackState();
+            } else {
+              renderReportState(retryRes);
+            }
+          });
+        }, 600);
         return;
       }
       renderReportState(response);
     });
   }
 
-  function retryStatusQuery() {
-    chrome.tabs.sendMessage(activeTab.id, { action: 'GET_STATUS' }, (response) => {
-      if (chrome.runtime.lastError || !response) {
-        renderFallbackState();
-        return;
-      }
-      renderReportState(response);
-    });
+  function updateSelectedCountBadge() {
+    const checkboxes = Array.from(tasksChecklistContainer.querySelectorAll('.task-checkbox'));
+    const checkedCount = checkboxes.filter((cb) => cb.checked).length;
+    tasksBadge.textContent = `${checkedCount} of ${checkboxes.length} selected`;
+    btnExportBatch.disabled = checkedCount === 0;
   }
 
   function renderReportState(data) {
-    const { reportInfo, metrics, tablesCount, tablesPreview, nativeExportAvailable } = data;
+    const { reportInfo, tasks, nativeExportAvailable } = data;
+    discoveredTasks = tasks || [];
 
     if (reportInfo.property) {
       activeResourceId = reportInfo.property;
     }
 
-    // Property display
-    propertyValue.textContent = reportInfo.property || 'Default Property';
+    propertyValue.textContent = reportInfo.property || 'Active Property';
     propertyValue.title = reportInfo.property || '';
-
-    // Report View display
     reportViewValue.textContent = `${reportInfo.reportName} (${reportInfo.subView || 'Overview'})`;
 
-    // Status Pill
     statusPill.className = 'status-pill status-active';
     statusText.textContent = reportInfo.reportName;
 
-    // Tables badge
-    tablesBadge.textContent = `${tablesCount} ${tablesCount === 1 ? 'table' : 'tables'}`;
+    tasksChecklistContainer.innerHTML = '';
 
-    // Render Metrics Chips
-    metricsChipContainer.innerHTML = '';
-    if (metrics && metrics.length > 0) {
-      metrics.slice(0, 4).forEach(m => {
-        const chip = document.createElement('div');
-        chip.className = 'metric-chip';
-        chip.innerHTML = `<span class="chip-label">${escapeHtml(m.label)}:</span> <span class="chip-val">${escapeHtml(m.value)}</span>`;
-        metricsChipContainer.appendChild(chip);
-      });
-    }
-
-    // Render Table Preview List
-    tablesPreviewContainer.innerHTML = '';
-    if (tablesPreview && tablesPreview.length > 0) {
-      tablesPreview.forEach((table, i) => {
-        const item = document.createElement('div');
-        item.className = 'table-row-item';
-        item.innerHTML = `
-          <span class="table-name" title="${escapeHtml(table.title)}">${i + 1}. ${escapeHtml(table.title)}</span>
-          <span class="table-count">${table.rows} rows</span>
+    if (discoveredTasks.length > 0) {
+      discoveredTasks.forEach((task) => {
+        const labelEl = document.createElement('label');
+        labelEl.className = 'task-item';
+        labelEl.innerHTML = `
+          <div class="task-left">
+            <input type="checkbox" class="task-checkbox" data-task-id="${escapeHtml(task.id)}" checked>
+            <div class="task-texts">
+              <span class="task-label" title="${escapeHtml(task.label)}">${escapeHtml(task.label)}</span>
+              <span class="task-section">${escapeHtml(task.section)}</span>
+            </div>
+          </div>
+          <span class="task-count">${escapeHtml(task.count || '')}</span>
         `;
-        tablesPreviewContainer.appendChild(item);
+        const cb = labelEl.querySelector('.task-checkbox');
+        cb.addEventListener('change', updateSelectedCountBadge);
+        tasksChecklistContainer.appendChild(labelEl);
       });
+      updateSelectedCountBadge();
     } else {
-      tablesPreviewContainer.innerHTML = `
-        <div class="empty-state">No tables visible on screen yet. Scroll down or wait for data to load.</div>
+      tasksBadge.textContent = '0 files';
+      tasksChecklistContainer.innerHTML = `
+        <div class="empty-state">
+          No exportable breakdown tables or Export buttons detected on this view yet. Wait for the report to finish loading or switch to Page Indexing, Crawl Stats, or Core Web Vitals.
+        </div>
       `;
+      btnExportBatch.disabled = !nativeExportAvailable;
     }
 
-    // Native export availability
-    if (nativeExportAvailable) {
-      nativeExportStatus.textContent = 'Available';
-      nativeExportStatus.className = 'tag-available';
-      btnNativeExport.disabled = false;
-    } else {
-      nativeExportStatus.textContent = 'Not in View';
-      nativeExportStatus.className = 'tag-unavailable';
-      btnNativeExport.disabled = false;
-    }
-
-    // Enable action buttons
-    btnExportZip.disabled = false;
-    btnExportCsv.disabled = false;
-    btnExportJson.disabled = false;
+    btnExportCurrentOnly.disabled = !nativeExportAvailable;
   }
 
   function renderFallbackState() {
@@ -183,82 +170,67 @@ document.addEventListener('DOMContentLoaded', async () => {
     statusText.textContent = 'GSC Detected';
     propertyValue.textContent = activeResourceId || 'Active Property';
     reportViewValue.textContent = 'Google Search Console';
-    tablesBadge.textContent = '0 tables';
-    tablesPreviewContainer.innerHTML = `
-      <div class="empty-state">Ready to export. Click below to scan and download available report data.</div>
+    tasksBadge.textContent = 'Ready';
+    tasksChecklistContainer.innerHTML = `
+      <div class="empty-state">Please refresh your Google Search Console tab (F5) so the updated v2.0.0 exporter can attach to the page.</div>
     `;
-    btnExportZip.disabled = false;
-    btnExportCsv.disabled = false;
-    btnExportJson.disabled = false;
   }
 
   function setNonGscState() {
     statusPill.className = 'status-pill status-inactive';
     statusText.textContent = 'Not on GSC';
     propertyValue.textContent = 'None';
-    reportViewValue.textContent = 'Please open Google Search Console';
-    tablesBadge.textContent = '0 tables';
+    reportViewValue.textContent = 'Open Google Search Console';
+    tasksBadge.textContent = '0 files';
 
-    tablesPreviewContainer.innerHTML = `
-      <div class="empty-state">Navigate to Google Search Console (Page Indexing, Crawl Stats, or Core Web Vitals) to export data.</div>
+    tasksChecklistContainer.innerHTML = `
+      <div class="empty-state">Navigate to Google Search Console (Page Indexing, Crawl Stats, or Core Web Vitals) to export report files.</div>
     `;
 
-    btnExportZip.disabled = true;
-    btnExportCsv.disabled = true;
-    btnExportJson.disabled = true;
-    btnNativeExport.disabled = true;
-    nativeExportStatus.textContent = 'Disabled';
-    nativeExportStatus.className = 'tag-unavailable';
+    btnExportBatch.disabled = true;
+    btnExportCurrentOnly.disabled = true;
   }
 
-  // --- EXPORT BUTTON HANDLERS ---
-
-  btnExportZip.addEventListener('click', async () => {
-    showProgress('Scanning tables & generating ZIP bundle...');
-    chrome.tabs.sendMessage(activeTab.id, { action: 'TRIGGER_EXPORT', format: 'zip' }, (res) => {
-      hideProgress();
-      if (res && res.success) {
-        window.close();
-      } else {
-        alert(res?.error || 'Export completed or downloaded.');
-      }
+  // Toggle All / None
+  btnToggleAll.addEventListener('click', () => {
+    const checkboxes = Array.from(tasksChecklistContainer.querySelectorAll('.task-checkbox'));
+    if (checkboxes.length === 0) return;
+    const allChecked = checkboxes.every((cb) => cb.checked);
+    checkboxes.forEach((cb) => {
+      cb.checked = !allChecked;
     });
+    updateSelectedCountBadge();
   });
 
-  btnExportCsv.addEventListener('click', async () => {
-    showProgress('Extracting and downloading CSV tables...');
-    chrome.tabs.sendMessage(activeTab.id, { action: 'TRIGGER_EXPORT', format: 'csv' }, (res) => {
-      hideProgress();
-      if (res && res.success) {
-        window.close();
-      }
+  // Trigger Batch Export (Main + Checked Drilldowns)
+  btnExportBatch.addEventListener('click', () => {
+    const checkboxes = Array.from(tasksChecklistContainer.querySelectorAll('.task-checkbox'));
+    const selectedTaskIds = checkboxes
+      .filter((cb) => cb.checked)
+      .map((cb) => cb.getAttribute('data-task-id'));
+
+    chrome.tabs.sendMessage(activeTab.id, {
+      action: 'START_BATCH_EXPORT',
+      format: selectedFormat,
+      selectedTaskIds: selectedTaskIds.length > 0 ? selectedTaskIds : null,
+      currentViewOnly: false
     });
+
+    // Close popup so user can watch the live progress widget on the GSC page
+    window.close();
   });
 
-  btnExportJson.addEventListener('click', async () => {
-    showProgress('Exporting complete structured JSON...');
-    chrome.tabs.sendMessage(activeTab.id, { action: 'TRIGGER_EXPORT', format: 'json' }, (res) => {
-      hideProgress();
-      if (res && res.success) {
-        window.close();
-      }
+  // Trigger Single Export on Current View Only
+  btnExportCurrentOnly.addEventListener('click', () => {
+    chrome.tabs.sendMessage(activeTab.id, {
+      action: 'START_BATCH_EXPORT',
+      format: selectedFormat,
+      currentViewOnly: true
     });
+    window.close();
   });
 
-  btnNativeExport.addEventListener('click', async () => {
-    showProgress('Triggering Google Search Console native export...');
-    chrome.tabs.sendMessage(activeTab.id, { action: 'TRIGGER_NATIVE_EXPORT', format: 'csv' }, (res) => {
-      hideProgress();
-      if (res && res.success) {
-        window.close();
-      } else {
-        alert(res?.error || 'Native export menu opened.');
-      }
-    });
-  });
-
-  // --- QUICK SWITCH / JUMP HANDLERS ---
-
+  // Quick Switch Navigation
   function navigateToReport(target) {
     const userMatch = activeTab?.url?.match(/search\.google\.com(\/u\/\d+|\/b\/\d+)?\/search-console/);
     const basePath = userMatch && userMatch[1] ? `${userMatch[1]}/search-console` : '/search-console';
@@ -267,7 +239,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (activeTab && activeTab.url && isGscUrl(activeTab.url)) {
       chrome.tabs.sendMessage(activeTab.id, { action: 'NAVIGATE_TO', target }, (res) => {
         if (chrome.runtime.lastError || !res?.success) {
-          // Direct fallback navigation
           let subPath = '';
           if (target === 'page-indexing') subPath = '/index';
           if (target === 'crawl-stats') subPath = '/settings/crawl-stats';
@@ -277,7 +248,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         window.close();
       });
     } else {
-      // Open in new tab or current tab
       let subPath = '';
       if (target === 'page-indexing') subPath = '/index';
       if (target === 'crawl-stats') subPath = '/settings/crawl-stats';

@@ -14,7 +14,7 @@
         <img src="../icons/icon32.png" alt="GSC Data Downloader" class="app-icon">
         <div class="header-titles">
           <h1 class="app-title">GSC Data Downloader</h1>
-          <span class="app-badge">Non-API Exporter</span>
+          <span class="app-badge">Native Report &amp; Drilldown Exporter</span>
         </div>
       </div>
       <div id="statusPill" class="status-pill status-loading">
@@ -25,80 +25,66 @@
 
     <!-- Main Content Area -->
     <main class="app-main">
-      <!-- Active Report Context Card -->
+      <!-- Active Report Context & Format Selector -->
       <section class="card context-card">
         <div class="context-row">
           <span class="context-label">Property:</span>
           <span id="propertyValue" class="context-value" title="Detected property">Detecting...</span>
         </div>
         <div class="context-row">
-          <span class="context-label">Report View:</span>
+          <span class="context-label">Active Report:</span>
           <span id="reportViewValue" class="context-value">Detecting...</span>
+        </div>
+        <div class="context-row format-row">
+          <span class="context-label">GSC Export Format:</span>
+          <div class="format-selector" role="radiogroup" aria-label="Export format">
+            <button type="button" id="fmtExcel" class="fmt-btn active" data-format="excel">Excel (.xlsx)</button>
+            <button type="button" id="fmtCsv" class="fmt-btn" data-format="csv">CSV (.zip)</button>
+          </div>
         </div>
       </section>
 
-      <!-- Data Discovery Preview Card -->
+      <!-- Discovered Native Exports Checklist -->
       <section id="discoveryCard" class="card discovery-card">
         <div class="card-header">
-          <h2 class="card-title">Detected Report Data</h2>
-          <span id="tablesBadge" class="count-badge">0 tables</span>
+          <div class="card-header-left">
+            <h2 class="card-title">Reports &amp; Drilldowns to Export</h2>
+            <button type="button" id="btnToggleAll" class="link-btn">All / None</button>
+          </div>
+          <span id="tasksBadge" class="count-badge">0 files</span>
         </div>
 
-        <div id="metricsChipContainer" class="metrics-chips">
-          <!-- Live metric chips will be inserted here -->
-        </div>
-
-        <div id="tablesPreviewContainer" class="tables-preview-list">
+        <div id="tasksChecklistContainer" class="tasks-checklist">
           <div class="loading-state">
             <div class="spinner"></div>
-            <span>Reading report data from page...</span>
+            <span>Scanning report &amp; sub-reports...</span>
           </div>
         </div>
       </section>
 
       <!-- Primary 1-Click Export Actions -->
       <section id="actionsSection" class="actions-section">
-        <button id="btnExportZip" class="btn btn-primary" title="Export all tables as CSV files, JSON, and summary inside a single ZIP file">
+        <button id="btnExportBatch" class="btn btn-primary" title="Exports the main report and automatically cycles through all checked sub-reports/drilldowns">
           <svg class="btn-icon" viewBox="0 0 24 24">
             <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
           </svg>
           <div class="btn-text-group">
-            <span class="btn-title">1-Click Export All (.ZIP)</span>
-            <span class="btn-subtitle">All tables as individual CSVs + JSON</span>
+            <span id="btnExportBatchTitle" class="btn-title">1-Click Export All Report Files (Excel)</span>
+            <span class="btn-subtitle">Cycles through main report &amp; checked drilldowns</span>
           </div>
         </button>
 
-        <div class="action-grid">
-          <button id="btnExportCsv" class="btn btn-secondary" title="Download all tables as CSV files">
-            <svg class="btn-icon-sm" viewBox="0 0 24 24">
-              <path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/>
-            </svg>
-            <span>CSVs Only</span>
-          </button>
-
-          <button id="btnExportJson" class="btn btn-secondary" title="Export structured JSON dataset">
-            <svg class="btn-icon-sm" viewBox="0 0 24 24">
-              <path d="M9.4 16.6L4.8 12l4.6-4.6L8 6l-6 6 6 6 1.4-1.4zm5.2 0l4.6-4.6-4.6-4.6L16 6l6 6-6 6-1.4-1.4z"/>
-            </svg>
-            <span>JSON</span>
-          </button>
-        </div>
-
-        <button id="btnNativeExport" class="btn btn-tertiary" title="Automates GSC's native export dropdown to download Google's official CSV">
+        <button id="btnExportCurrentOnly" class="btn btn-secondary" title="Only clicks Export on the currently open screen without navigating into drilldowns">
           <svg class="btn-icon-sm" viewBox="0 0 24 24">
-            <path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM17 13l-5 5-5-5h3V9h4v4h3z"/>
+            <path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm-2 16l-4-4h2.5v-3h3v3H16l-4 4zm1-9V3.5L18.5 9H13z"/>
           </svg>
-          <div class="btn-text-group-inline">
-            <span>Trigger Google Native CSV Export</span>
-            <span id="nativeExportStatus" class="tag-available">Available</span>
-          </div>
+          <span id="btnCurrentOnlyText">Export Current View Only (Excel)</span>
         </button>
       </section>
 
-      <!-- Non-GSC or Report Jump Helper (Shown when not on target report or for quick switching) -->
+      <!-- Quick Report Switcher -->
       <section class="card jump-card">
         <h3 class="jump-title">Quick Switch Report</h3>
-        <p class="jump-desc">Jump directly to another GSC report for the active property:</p>
         <div class="jump-buttons">
           <button id="jumpIndexing" class="btn-jump">
             <span class="jump-emoji">📑</span> Page Indexing
@@ -120,18 +106,10 @@
           <span class="toggle-label">Show 1-Click floating button in GSC</span>
         </label>
         <div class="footer-meta">
-          <span id="appVersion">v1.0.0</span> • <span>No API keys required</span>
+          <span id="appVersion">v2.0.0</span>
         </div>
       </footer>
     </main>
-
-    <!-- Progress Notification Overlay -->
-    <div id="progressOverlay" class="progress-overlay hidden">
-      <div class="progress-card">
-        <div class="spinner-large"></div>
-        <p id="progressMessage">Preparing download...</p>
-      </div>
-    </div>
   </div>
 
   <script src="popup.js"></script>
