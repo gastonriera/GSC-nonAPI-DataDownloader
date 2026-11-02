@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "GSC non-API Data Downloader",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "1-Click automated native export (Excel/CSV) of Google Search Console reports and all drilldowns: Page Indexing, Crawl Stats, and Core Web Vitals.",
   "icons": {
     "16": "icons/icon16.png",

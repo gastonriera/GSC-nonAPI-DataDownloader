@@ -10,8 +10,8 @@
 (function () {
   'use strict';
 
-  if (window.__GSC_DOWNLOADER_V2_INITIALIZED__) return;
-  window.__GSC_DOWNLOADER_V2_INITIALIZED__ = true;
+  if (window.__GSC_DOWNLOADER_V202_INITIALIZED__) return;
+  window.__GSC_DOWNLOADER_V202_INITIALIZED__ = true;
 
   let isBatchRunning = false;
   let cancelBatchRequested = false;
@@ -224,38 +224,191 @@
     return null;
   }
 
-  function findExportMenuItem(format = 'excel') {
-    const pattern = format === 'csv' ? /csv/i : /excel/i;
+  /**
+   * Visibility check for popup menu/modal elements (allows mid-transition opacity).
+   */
+  function isMenuElementVisible(el) {
+    if (!el || !el.isConnected) return false;
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return false;
 
-    // 1. Check standard ARIA menu items that are currently visible
-    const menuItems = Array.from(document.querySelectorAll(
-      '[role="menuitem"], [role="option"], .goog-menuitem, .mat-menu-item, [role="menu"] [jsaction]'
-    )).filter((el) => isElementVisible(el));
+    let cur = el;
+    while (cur && cur !== document.documentElement) {
+      const style = window.getComputedStyle(cur);
+      if (style.display === 'none' || style.visibility === 'hidden') {
+        return false;
+      }
+      cur = cur.parentElement;
+    }
+    return true;
+  }
+
+  /**
+   * Checks that text/aria matches ONLY the target export option ("Download Excel" or "Download CSV")
+   * and is NOT a parent menu container holding all options ("Google Sheets Download Excel Download CSV").
+   */
+  function isSingleExportOptionMatch(text, aria, format = 'excel') {
+    const combined = `${text || ''} ${aria || ''}`.replace(/\s+/g, ' ').trim();
+    if (!combined) return false;
+
+    // Reject parent containers that contain multiple menu options
+    const hasSheets = /sheets/i.test(combined);
+    const hasExcel = /excel/i.test(combined);
+    const hasCsv = /csv/i.test(combined);
+
+    if ((hasSheets && hasExcel) || (hasSheets && hasCsv) || (hasExcel && hasCsv)) {
+      return false;
+    }
+
+    if (format === 'csv') {
+      return hasCsv;
+    }
+    return hasExcel;
+  }
+
+  function findExportMenuItem(format = 'excel') {
+    // 1. Check standard ARIA / Closure / Material menu items (NEVER match parent [role="menu"] wrappers)
+    const itemSelectors = [
+      '[role="menuitem"]',
+      '[role="option"]',
+      '[role="menuitemradio"]',
+      '[role="radio"]',
+      '.goog-menuitem',
+      '.mat-menu-item',
+      '.z80M1'
+    ];
+
+    const menuItems = Array.from(document.querySelectorAll(itemSelectors.join(',')))
+      .filter((el) => isMenuElementVisible(el) && !el.closest('#gsc-downloader-floating-root'));
 
     for (const item of menuItems) {
       const txt = getCleanElementText(item) || (item.textContent || '').trim();
-      if (pattern.test(txt) && txt.length < 60) {
-        return item.closest('[role="menuitem"], [role="option"], .goog-menuitem') || item;
+      const aria = item.getAttribute('aria-label') || '';
+      if (isSingleExportOptionMatch(txt, aria, format)) {
+        const innerEl =
+          Array.from(item.querySelectorAll('.jO7h3c, .uyYuVb, span, div'))
+            .filter((child) => isMenuElementVisible(child) && isSingleExportOptionMatch(child.textContent, '', format))
+            .pop() || item;
+        return { menuItem: item, innerEl };
       }
     }
 
-    // 2. Fallback: Check any visible leaf element with "Download Excel" / "Excel" / "Download CSV"
-    const allLeafs = Array.from(document.querySelectorAll('span, div, li, button, a'))
-      .filter((el) => isElementVisible(el) && el.children.length === 0 && !el.closest('#gsc-downloader-floating-root'));
+    // 2. Fallback: Find the innermost visible text element matching "Download Excel" / "Excel"
+    const allElements = Array.from(document.querySelectorAll('span, div, li, button, a, label'))
+      .filter((el) => isMenuElementVisible(el) && !el.closest('#gsc-downloader-floating-root'));
 
-    for (const leaf of allLeafs) {
-      const txt = (leaf.textContent || '').trim();
-      if (pattern.test(txt) && txt.length < 40 && /(download|excel|csv)/i.test(txt)) {
-        return leaf.closest('[role="menuitem"], [role="option"], [role="button"], li, [jsaction]') || leaf;
-      }
+    const matchingNodes = allElements.filter((el) => {
+      const txt = getCleanElementText(el) || (el.textContent || '').trim();
+      const aria = el.getAttribute('aria-label') || '';
+      return txt.length < 35 && isSingleExportOptionMatch(txt, aria, format);
+    });
+
+    if (matchingNodes.length > 0) {
+      // Pick the deepest / innermost node
+      const innerEl = matchingNodes[matchingNodes.length - 1];
+      const interactiveAncestor = innerEl.closest(
+        '[role="menuitem"], [role="option"], [role="radio"], [role="button"], button, a, li'
+      );
+      return {
+        menuItem: interactiveAncestor || innerEl,
+        innerEl
+      };
     }
 
     return null;
   }
 
   /**
-   * Triggers GSC's native Export button on the currently visible view and selects
-   * "Download Excel" (or "Download CSV").
+   * Performs a multi-stage human-realistic hover -> highlight -> mousedown -> mouseup -> click
+   * sequence on a Google Closure / Wiz menu item so "Download Excel" is reliably selected.
+   */
+  async function activateExportMenuItem(matchObj) {
+    const { menuItem, innerEl } = matchObj;
+    const target = innerEl || menuItem;
+
+    const rect = menuItem.getBoundingClientRect();
+    const x = rect.left + rect.width / 2;
+    const y = rect.top + rect.height / 2;
+
+    const baseOpts = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      view: window,
+      clientX: x,
+      clientY: y,
+      screenX: x,
+      screenY: y,
+      button: 0
+    };
+
+    // Stage 1: Hover & Highlight (Closure jscontroller="uY3Nvd" requires mouseenter/mouseover to set highlightedItem)
+    for (const el of [menuItem, target]) {
+      el.dispatchEvent(new PointerEvent('pointerenter', { ...baseOpts, buttons: 0 }));
+      el.dispatchEvent(new MouseEvent('mouseenter', { ...baseOpts, buttons: 0 }));
+      el.dispatchEvent(new PointerEvent('pointerover', { ...baseOpts, buttons: 0 }));
+      el.dispatchEvent(new MouseEvent('mouseover', { ...baseOpts, buttons: 0 }));
+      el.dispatchEvent(new PointerEvent('pointermove', { ...baseOpts, buttons: 0 }));
+      el.dispatchEvent(new MouseEvent('mousemove', { ...baseOpts, buttons: 0 }));
+    }
+    if (typeof menuItem.focus === 'function') {
+      try { menuItem.focus({ preventScroll: true }); } catch (e) {}
+    }
+
+    // Wait 90ms for Closure/Wiz to apply highlight state (.FwR7Pc) to the menu item
+    await sleep(90);
+
+    // Stage 2: Mouse / Pointer Press Down
+    for (const el of [target, menuItem]) {
+      el.dispatchEvent(new PointerEvent('pointerdown', { ...baseOpts, buttons: 1 }));
+      el.dispatchEvent(new MouseEvent('mousedown', { ...baseOpts, buttons: 1 }));
+    }
+
+    await sleep(65);
+
+    // Stage 3: Mouse / Pointer Release & Click
+    for (const el of [target, menuItem]) {
+      el.dispatchEvent(new PointerEvent('pointerup', { ...baseOpts, buttons: 0 }));
+      el.dispatchEvent(new MouseEvent('mouseup', { ...baseOpts, buttons: 0 }));
+      el.dispatchEvent(new MouseEvent('click', { ...baseOpts, buttons: 0 }));
+    }
+
+    // Stage 4: Fallback if menu/modal is still open after 250ms
+    await sleep(250);
+    if (isMenuElementVisible(menuItem)) {
+      try { target.click(); } catch (e) {}
+      try { menuItem.click(); } catch (e) {}
+
+      // Also dispatch Enter key on the focused menuItem (Closure menus execute action on Enter)
+      const keyOpts = {
+        key: 'Enter',
+        code: 'Enter',
+        keyCode: 13,
+        which: 13,
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        view: window
+      };
+      menuItem.dispatchEvent(new KeyboardEvent('keydown', keyOpts));
+      menuItem.dispatchEvent(new KeyboardEvent('keypress', keyOpts));
+      menuItem.dispatchEvent(new KeyboardEvent('keyup', keyOpts));
+
+      // If inside a modal dialog with a separate confirm/download button, click it too
+      const dialog = menuItem.closest('[role="dialog"], [role="alertdialog"]');
+      if (dialog) {
+        const confirmBtn = Array.from(dialog.querySelectorAll('button, [role="button"]'))
+          .find((b) => isMenuElementVisible(b) && /^(download|export|ok|confirm)$/i.test(getCleanElementText(b)));
+        if (confirmBtn) {
+          dispatchRealClick(confirmBtn);
+        }
+      }
+    }
+  }
+
+  /**
+   * Triggers GSC's native Export button on the currently visible view and automatically
+   * selects "Download Excel" (or "Download CSV").
    */
   async function triggerSingleNativeExport(format = 'excel', meta = null) {
     // Poll up to 4 seconds for the view's Export button to appear
@@ -297,28 +450,33 @@
       }
     });
 
-    // Click the Export button to open the dropdown menu (or trigger direct download)
-    dispatchRealClick(exportBtn);
+    // Check if the Export menu is already open; if not, click the Export button
+    let matchObj = findExportMenuItem(format);
+    if (!matchObj) {
+      dispatchRealClick(exportBtn);
 
-    // Wait up to 2.4 seconds for the Export dropdown menu item ("Download Excel" / "Download CSV")
-    let menuItem = null;
-    for (let i = 0; i < 24; i++) {
-      await sleep(100);
-      if (downloadStarted) {
-        // Direct download started without needing a dropdown menu
-        await sleep(500);
-        return { success: true, direct: true };
-      }
-      menuItem = findExportMenuItem(format);
-      if (menuItem) break;
+      // Poll up to 2.5 seconds for the Export menu item ("Download Excel" / "Download CSV") to appear
+      for (let i = 0; i < 25; i++) {
+        await sleep(100);
+        if (downloadStarted) {
+          await sleep(500);
+          return { success: true, direct: true };
+        }
+        matchObj = findExportMenuItem(format);
+        if (matchObj) break;
 
-      // Retry native .click() at 700ms if menu hasn't appeared yet
-      if (i === 7) {
-        try { exportBtn.click(); } catch (e) {}
+        // Only retry native .click() at 800ms if no [role="menu"] is visible yet
+        if (i === 8) {
+          const anyMenuOpen = Array.from(document.querySelectorAll('[role="menu"], [role="dialog"]'))
+            .some((m) => isMenuElementVisible(m));
+          if (!anyMenuOpen) {
+            try { exportBtn.click(); } catch (e) {}
+          }
+        }
       }
     }
 
-    if (!menuItem) {
+    if (!matchObj) {
       if (downloadStarted) {
         return { success: true, direct: true };
       }
@@ -328,19 +486,9 @@
       };
     }
 
-    // Wait 150ms for menu animation to stabilize, then click the menu item
-    await sleep(150);
-    dispatchRealClick(menuItem);
-
-    // Fallback: if menu item is still visible after 350ms and download hasn't started, call .click()
-    await sleep(350);
-    if (!downloadStarted && isElementVisible(menuItem)) {
-      try { menuItem.click(); } catch (e) {}
-      const innerSpan = menuItem.querySelector('span, div');
-      if (innerSpan) {
-        try { innerSpan.click(); } catch (e) {}
-      }
-    }
+    // Wait 180ms for GSC's menu open animation to settle, then automatically select "Download Excel"
+    await sleep(180);
+    await activateExportMenuItem(matchObj);
 
     // Wait for Chrome to confirm the download started (or timeout after 5.5s)
     await downloadWaitPromise;
@@ -1006,7 +1154,10 @@
   }
 
   function injectFloatingButton() {
-    if (document.getElementById('gsc-downloader-floating-root')) return;
+    const existing = document.getElementById('gsc-downloader-floating-root');
+    if (existing) {
+      existing.remove();
+    }
     const reportInfo = detectReportInfo();
     if (!reportInfo.isGSC) return;
 
@@ -1070,7 +1221,8 @@
       const action = request.action;
 
       if (action === 'PING') {
-        sendResponse({ pong: true });
+        const ver = chrome.runtime?.getManifest ? chrome.runtime.getManifest().version : '2.0.2';
+        sendResponse({ pong: true, version: ver });
         return true;
       }
 

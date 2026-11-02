@@ -19,11 +19,21 @@ chrome.runtime.onInstalled.addListener((details) => {
   console.log('GSC non-API Data Downloader installed/updated:', details.reason);
 });
 
-// Ensure content script is injected if user clicks action on an already open GSC tab
+// Ensure latest content script is injected if user clicks action on an already open GSC tab
 async function ensureContentScriptInjected(tabId) {
+  const currentVersion = chrome.runtime.getManifest().version;
+  let needsInjection = false;
+
   try {
-    await chrome.tabs.sendMessage(tabId, { action: 'PING' });
+    const res = await chrome.tabs.sendMessage(tabId, { action: 'PING' });
+    if (!res || res.version !== currentVersion) {
+      needsInjection = true;
+    }
   } catch (err) {
+    needsInjection = true;
+  }
+
+  if (needsInjection) {
     try {
       await chrome.scripting.executeScript({
         target: { tabId },
