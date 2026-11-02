@@ -1,4 +1,4 @@
-# GSC non-API Data Downloader (`v2.1.0`)
+# GSC non-API Data Downloader (`v2.1.1`)
 
 A property-agnostic Chrome extension (Manifest V3) that automates **1-click native file exports (`Download Excel` / `Download CSV`)** across Google Search Console reports and all of their sub-reports/drilldowns:
 1. **Page Indexing Report** (`/index` — exports Indexed Pages + cycles through every reason in *"Why pages aren't indexed"*)
@@ -11,11 +11,11 @@ A property-agnostic Chrome extension (Manifest V3) that automates **1-click nati
 
 The official Google Search Console API does not provide endpoints for Crawl Stats, Core Web Vitals aggregates, or full Page Indexing drilldowns. In the GSC web interface, downloading all of these requires manually clicking into dozens of sub-reports and clicking `Export` → `Download Excel` one by one.
 
-**GSC non-API Data Downloader (`v2.1.0`)** automates that entire process with a single click—regardless of which domain or property type is open—downloading the official Google Search Console `.xlsx` (or `.zip` CSV) files and organizing them into a clean folder in your `Downloads` directory.
+**GSC non-API Data Downloader (`v2.1.1`)** automates that entire process with a single click—regardless of which domain or property type is open—downloading the official Google Search Console `.xlsx` (or `.zip` CSV) files and organizing them into a clean folder in your `Downloads` directory.
 
 ---
 
-## 🚀 Key Features (`v2.1.0`)
+## 🚀 Key Features (`v2.1.1`)
 
 * **🌐 100% Property-Agnostic**:
   * Works on any GSC property (Domain property, URL-prefix property, subfolder, etc.) without inspecting or depending on the domain name.

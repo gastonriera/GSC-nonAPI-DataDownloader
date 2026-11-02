@@ -1,5 +1,5 @@
 /**
- * GSC non-API Data Downloader - Content Script (v2.1.0)
+ * GSC non-API Data Downloader - Content Script (v2.1.1)
  * Automates Google Search Console's native Export menu ("Download Excel" / "Download CSV")
  * across the main report AND all sub-reports/drilldowns for:
  * 1. Page Indexing (Indexed pages + all "Why pages aren't indexed" reason drilldowns)
@@ -11,14 +11,27 @@
 (function () {
   'use strict';
 
-  if (window.__GSC_DOWNLOADER_V210_INITIALIZED__) return;
-  window.__GSC_DOWNLOADER_V210_INITIALIZED__ = true;
+  if (window.__GSC_DOWNLOADER_V211_INITIALIZED__) return;
+  window.__GSC_DOWNLOADER_V211_INITIALIZED__ = true;
 
   let isBatchRunning = false;
   let cancelBatchRequested = false;
   let batchProgressState = null;
 
   // --- UTILITIES & VISIBILITY HELPERS ---
+
+  /**
+   * Safely checks whether the extension context is still valid.
+   * Prevents "Extension context invalidated" errors when the extension is reloaded
+   * while a tab remains open.
+   */
+  function isExtensionValid() {
+    try {
+      return Boolean(typeof chrome !== 'undefined' && chrome.runtime && !!chrome.runtime.id);
+    } catch (e) {
+      return false;
+    }
+  }
 
   function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -459,7 +472,7 @@
     }
 
     // Inform background service worker so it can rename/organize the downloaded file
-    if (meta && typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+    if (meta && isExtensionValid() && chrome.runtime?.sendMessage) {
       try {
         await chrome.runtime.sendMessage({
           action: 'PREPARE_DOWNLOAD',
@@ -471,11 +484,19 @@
     // Start listening for Chrome download creation in parallel
     let downloadStarted = false;
     const downloadWaitPromise = new Promise((resolve) => {
-      if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
-        chrome.runtime.sendMessage({ action: 'WAIT_FOR_DOWNLOAD', timeoutMs: 5500 }, (res) => {
-          if (res && res.started) downloadStarted = true;
-          resolve(res);
-        });
+      if (isExtensionValid() && chrome.runtime?.sendMessage) {
+        try {
+          chrome.runtime.sendMessage({ action: 'WAIT_FOR_DOWNLOAD', timeoutMs: 5500 }, (res) => {
+            if (chrome.runtime?.lastError || !res) {
+              resolve({ started: false });
+              return;
+            }
+            if (res.started) downloadStarted = true;
+            resolve(res);
+          });
+        } catch (e) {
+          setTimeout(() => resolve({ started: false }), 2500);
+        }
       } else {
         setTimeout(() => resolve({ started: false }), 2500);
       }
@@ -1610,24 +1631,37 @@
     `;
 
     btn.addEventListener('click', () => {
-      if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-        chrome.storage.local.get({ exportFormat: 'excel' }, (res) => {
-          runBatchNativeExport({ format: res.exportFormat || 'excel' });
-        });
+      let format = 'excel';
+      if (isExtensionValid()) {
+        try {
+          chrome.storage.local.get({ exportFormat: 'excel' }, (res) => {
+            if (chrome.runtime?.lastError) {
+              runBatchNativeExport({ format: 'excel' });
+            } else {
+              runBatchNativeExport({ format: res?.exportFormat || 'excel' });
+            }
+          });
+          return;
+        } catch (err) {
+          console.warn('GSC non-API Downloader: Extension context invalidated, using default settings.', err);
+        }
       } else {
-        runBatchNativeExport({ format: 'excel' });
+        showToast('Extension was updated. Please refresh the page (F5) to enable full features.', 'warning');
       }
+      runBatchNativeExport({ format });
     });
 
     container.appendChild(btn);
     document.body.appendChild(container);
 
-    if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-      chrome.storage.local.get({ showFloatingButton: true }, (res) => {
-        if (!res.showFloatingButton) {
-          container.style.display = 'none';
-        }
-      });
+    if (isExtensionValid()) {
+      try {
+        chrome.storage.local.get({ showFloatingButton: true }, (res) => {
+          if (!chrome.runtime?.lastError && res && !res.showFloatingButton) {
+            container.style.display = 'none';
+          }
+        });
+      } catch (e) {}
     }
   }
 
@@ -1656,7 +1690,7 @@
       const action = request.action;
 
       if (action === 'PING') {
-        const ver = chrome.runtime?.getManifest ? chrome.runtime.getManifest().version : '2.1.0';
+        const ver = (isExtensionValid() && chrome.runtime?.getManifest) ? chrome.runtime.getManifest().version : '2.1.1';
         sendResponse({ pong: true, version: ver });
         return true;
       }
