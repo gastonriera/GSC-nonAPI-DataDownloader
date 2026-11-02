@@ -1,5 +1,5 @@
 /**
- * GSC non-API Data Downloader - Content Script (v3.0.0)
+ * GSC non-API Data Downloader - Content Script (v3.1.0)
  * Automates Google Search Console's native Export menu ("Download Excel" / "Download CSV")
  * across the main report AND all sub-reports/drilldowns for:
  * 1. Page Indexing (Indexed pages + all "Why pages aren't indexed" reason drilldowns)
@@ -12,8 +12,8 @@
 (function () {
   'use strict';
 
-  if (window.__GSC_DOWNLOADER_V300_INITIALIZED__) return;
-  window.__GSC_DOWNLOADER_V300_INITIALIZED__ = true;
+  if (window.__GSC_DOWNLOADER_V310_INITIALIZED__) return;
+  window.__GSC_DOWNLOADER_V310_INITIALIZED__ = true;
 
   let isBatchRunning = false;
   let cancelBatchRequested = false;
@@ -240,9 +240,15 @@
     } else if (url.includes('/core-web-vitals')) {
       reportType = 'core-web-vitals';
       reportName = 'Core Web Vitals';
-      if (url.includes('/drilldown') || url.includes('item_key=')) {
+      if (url.includes('/drilldown')) {
         isDrilldown = true;
-        subView = pageTitle || 'Issue Drilldown';
+        const isGoodUrls = !url.includes('item_key=');
+        const deviceName = (url.includes('device=1') || /desktop/i.test(pageTitle)) ? 'Desktop' : 'Mobile';
+        if (isGoodUrls) {
+          subView = pageTitle || `${deviceName} Good URLs Report`;
+        } else {
+          subView = pageTitle || `${deviceName} Issue Drilldown`;
+        }
       } else if (url.includes('device=2') || url.includes('/mobile') || /mobile/i.test(pageTitle)) {
         subView = 'Mobile Report';
       } else if (url.includes('device=1') || url.includes('/desktop') || /desktop/i.test(pageTitle)) {
@@ -988,12 +994,49 @@
   }
 
   /**
-   * Finds the "View data about good URLs" button or link on the Core Web Vitals device report.
+   * Constructs the canonical Google Search Console URL for the Good URLs drilldown report
+   * (e.g. https://search.google.com/u/0/search-console/core-web-vitals/drilldown?resource_id=...&device=2).
    */
-  function findCwvGoodUrlsButton() {
+  function buildCwvGoodUrlsUrl(device = 2) {
+    try {
+      const currentUrl = new URL(window.location.href);
+      const resourceId = currentUrl.searchParams.get('resource_id') || '';
+      const userMatch = window.location.pathname.match(/^(\/u\/\d+|\/b\/\d+)?\/search-console/);
+      const prefix = userMatch ? userMatch[0] : '/search-console';
+      const deviceNum = (device === 1 || String(device).toLowerCase() === 'desktop') ? 1 : 2;
+
+      if (resourceId) {
+        return `https://search.google.com${prefix}/core-web-vitals/drilldown?resource_id=${encodeURIComponent(resourceId)}&device=${deviceNum}`;
+      }
+      currentUrl.searchParams.set('device', String(deviceNum));
+      currentUrl.searchParams.delete('item_key');
+      return `https://search.google.com${prefix}/core-web-vitals/drilldown?${currentUrl.searchParams.toString()}`;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /**
+   * Finds the "View data about good URLs" button or link on the Core Web Vitals report.
+   * Matches links by href (/core-web-vitals/drilldown?device=) as well as multilingual button text (EN, ES, FR, DE, etc.).
+   */
+  function findCwvGoodUrlsButton(device = 2) {
+    const deviceNum = (device === 1 || String(device).toLowerCase() === 'desktop') ? 1 : 2;
+
+    // 1. Direct href match for canonical drilldown link
+    const candidateLinks = Array.from(document.querySelectorAll('a[href*="/core-web-vitals/drilldown"], [role="button"][href*="/core-web-vitals/drilldown"]'))
+      .filter((el) => isElementVisible(el) && !el.closest('#gsc-downloader-floating-root') && !el.href.includes('item_key='));
+
+    const exactLink = candidateLinks.find((el) => el.href.includes(`device=${deviceNum}`));
+    if (exactLink) return exactLink;
+    if (candidateLinks.length > 0) return candidateLinks[0];
+
+    // 2. Multilingual text and aria-label matching
     const candidates = Array.from(document.querySelectorAll(
       '[role="button"], a, button, [jsaction], [tabindex="0"], span, div'
     )).filter((el) => isElementVisible(el) && !el.closest('#gsc-downloader-floating-root'));
+
+    const goodUrlsRegex = /(?:view data about good (?:urls|pages)|view good (?:urls|pages)|good (?:urls|pages)|ver datos sobre (?:las )?(?:urls|p[aá]ginas) correctas|ver datos sobre (?:las )?(?:urls|p[aá]ginas) buenas|urls correctas|urls v[aá]lidas|urls buenas|buenas urls|bonnes url|fehlerfreie urls|url validi)/i;
 
     for (const el of candidates) {
       const txt = getCleanElementText(el);
@@ -1004,12 +1047,7 @@
         ''
       ).toLowerCase();
 
-      if (
-        /^view data about good (urls|pages)$/i.test(txt) ||
-        /view data about good (urls|pages)/i.test(aria) ||
-        /^view good (urls|pages)$/i.test(txt) ||
-        (el.matches('button, [role="button"], a, [tabindex="0"]') && /^good (urls|pages)$/i.test(txt))
-      ) {
+      if (goodUrlsRegex.test(txt) || goodUrlsRegex.test(aria)) {
         return el.closest('[role="button"], a, button, [tabindex="0"], [jsaction]') || el;
       }
     }
@@ -1481,6 +1519,28 @@
             count: 'Full Report'
           });
         });
+
+        // Also expose direct Good URLs reports for Mobile and Desktop
+        tasks.push({
+          id: 'cwv-good-urls-mobile',
+          type: 'cwv-good-urls-btn',
+          device: 'Mobile',
+          section: 'Good URLs',
+          label: 'Mobile Good URLs (View data about good URLs)',
+          count: 'Mobile',
+          targetUrl: buildCwvGoodUrlsUrl(2)
+        });
+
+        tasks.push({
+          id: 'cwv-good-urls-desktop',
+          type: 'cwv-good-urls-btn',
+          device: 'Desktop',
+          section: 'Good URLs',
+          label: 'Desktop Good URLs (View data about good URLs)',
+          count: 'Desktop',
+          targetUrl: buildCwvGoodUrlsUrl(1)
+        });
+
         return { reportInfo, tasks };
       }
 
@@ -1495,17 +1555,18 @@
         });
       }
 
-      // Check if "Good URLs" report button is present on this device view
-      const goodUrlsBtn = findCwvGoodUrlsButton();
-      if (goodUrlsBtn) {
-        tasks.push({
-          id: 'cwv-good-urls',
-          type: 'cwv-good-urls-btn',
-          section: reportInfo.subView || 'Good URLs',
-          label: 'Good URLs (View data about good URLs)',
-          count: 'Good URLs'
-        });
-      }
+      // Dedicated Good URLs report for the active device
+      const currentDevice = (reportInfo.subView && /desktop/i.test(reportInfo.subView)) ? 'Desktop' : 'Mobile';
+      const deviceNum = currentDevice === 'Desktop' ? 1 : 2;
+      tasks.push({
+        id: `cwv-good-urls-${currentDevice.toLowerCase()}`,
+        type: 'cwv-good-urls-btn',
+        device: currentDevice,
+        section: reportInfo.subView || 'Good URLs',
+        label: `${currentDevice} Good URLs (View data about good URLs)`,
+        count: currentDevice,
+        targetUrl: buildCwvGoodUrlsUrl(deviceNum)
+      });
 
       const rows = findClickableTableRows(reportInfo);
       rows.forEach((r) => {
@@ -1837,25 +1898,44 @@
         // 2b. "View data about good URLs" button on Core Web Vitals
         if (task.type === 'cwv-good-urls-btn') {
           const overviewState = captureViewState();
-          const goodBtn = findCwvGoodUrlsButton();
-          if (!goodBtn) {
-            skippedCount++;
-            continue;
+          const targetDevice = task.device || (task.id.includes('desktop') ? 'Desktop' : 'Mobile');
+          const targetDeviceNum = targetDevice === 'Desktop' ? 1 : 2;
+          const targetUrl = task.targetUrl || buildCwvGoodUrlsUrl(targetDeviceNum);
+
+          showProgressPanel(i + 1, tasksToRun.length, `Loading ${targetDevice} Good URLs report...`);
+
+          let navigated = false;
+          const goodBtn = findCwvGoodUrlsButton(targetDeviceNum);
+          if (goodBtn) {
+            dispatchRealClick(goodBtn);
+            await sleep(400);
+            if (isAtViewState(overviewState)) {
+              try { goodBtn.click(); } catch (e) {}
+            }
+            navigated = await waitForViewChange(overviewState, 5000);
           }
 
-          dispatchRealClick(goodBtn);
-          await sleep(400);
-          if (isAtViewState(overviewState)) {
-            try { goodBtn.click(); } catch (e) {}
+          // If button click didn't navigate or button was not found, trigger navigation to targetUrl!
+          if (!navigated && targetUrl) {
+            const anchor = Array.from(document.querySelectorAll('a[href*="/core-web-vitals/drilldown"]'))
+              .find((a) => isElementVisible(a) && a.href.includes(`device=${targetDeviceNum}`) && !a.href.includes('item_key='));
+            if (anchor) {
+              dispatchRealClick(anchor);
+              try { anchor.click(); } catch (e) {}
+              navigated = await waitForViewChange(overviewState, 5000);
+            }
+            if (!navigated) {
+              window.location.href = targetUrl;
+              return { success: true, navigated: true };
+            }
           }
 
-          const changed = await waitForViewChange(overviewState, 7000);
-          if (changed) {
+          if (navigated) {
             const res = await triggerSingleNativeExport(
               format,
               {
                 reportName: 'Core_Web_Vitals',
-                section: task.section || 'Good_URLs',
+                section: targetDevice,
                 label: 'Good_URLs',
                 index: fileIndex
               },
@@ -1950,17 +2030,31 @@
             }
 
             // Also check for and export Good URLs report if available for this device
-            const goodUrlsBtn = findCwvGoodUrlsButton();
-            if (goodUrlsBtn) {
+            const deviceNum = task.device === 'Desktop' ? 1 : 2;
+            const goodUrlsBtn = findCwvGoodUrlsButton(deviceNum);
+            const goodUrlsTarget = buildCwvGoodUrlsUrl(deviceNum);
+            if (goodUrlsBtn || goodUrlsTarget) {
               showProgressPanel(i + 1, tasksToRun.length, `CWV ${task.device}: Good URLs Report`);
               const preGoodState = captureViewState();
-              dispatchRealClick(goodUrlsBtn);
-              await sleep(400);
-              if (isAtViewState(preGoodState)) {
-                try { goodUrlsBtn.click(); } catch (e) {}
+              let enteredGood = false;
+              if (goodUrlsBtn) {
+                dispatchRealClick(goodUrlsBtn);
+                await sleep(400);
+                if (isAtViewState(preGoodState)) {
+                  try { goodUrlsBtn.click(); } catch (e) {}
+                }
+                enteredGood = await waitForViewChange(preGoodState, 5000);
+              }
+              if (!enteredGood && goodUrlsTarget) {
+                const anchor = Array.from(document.querySelectorAll('a[href*="/core-web-vitals/drilldown"]'))
+                  .find((a) => isElementVisible(a) && a.href.includes(`device=${deviceNum}`) && !a.href.includes('item_key='));
+                if (anchor) {
+                  dispatchRealClick(anchor);
+                  try { anchor.click(); } catch (e) {}
+                  enteredGood = await waitForViewChange(preGoodState, 5000);
+                }
               }
 
-              const enteredGood = await waitForViewChange(preGoodState, 7000);
               if (enteredGood) {
                 const goodRes = await triggerSingleNativeExport(
                   format,
@@ -2171,7 +2265,7 @@
       const action = request.action;
 
       if (action === 'PING') {
-        const ver = (isExtensionValid() && chrome.runtime?.getManifest) ? chrome.runtime.getManifest().version : '3.0.0';
+        const ver = (isExtensionValid() && chrome.runtime?.getManifest) ? chrome.runtime.getManifest().version : '3.1.0';
         sendResponse({ pong: true, version: ver });
         return true;
       }
@@ -2224,6 +2318,12 @@
           newPath = `${prefix}/settings/crawl-stats${searchQuery}`;
         } else if (target === 'core-web-vitals') {
           newPath = `${prefix}/core-web-vitals${searchQuery}`;
+        } else if (target === 'cwv-good-urls-mobile' || target === 'cwv-good-urls') {
+          const resId = new URLSearchParams(searchQuery).get('resource_id') || '';
+          newPath = `${prefix}/core-web-vitals/drilldown?resource_id=${encodeURIComponent(resId)}&device=2`;
+        } else if (target === 'cwv-good-urls-desktop') {
+          const resId = new URLSearchParams(searchQuery).get('resource_id') || '';
+          newPath = `${prefix}/core-web-vitals/drilldown?resource_id=${encodeURIComponent(resId)}&device=1`;
         }
 
         if (newPath) {

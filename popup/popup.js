@@ -1,5 +1,5 @@
 /**
- * GSC non-API Data Downloader - Popup Controller (v3.0.0)
+ * GSC non-API Data Downloader - Popup Controller (v3.1.0)
  * Controls native report & drilldown export selection and format preferences.
  */
 
@@ -22,6 +22,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const jumpIndexing = document.getElementById('jumpIndexing');
   const jumpCrawlStats = document.getElementById('jumpCrawlStats');
   const jumpCwv = document.getElementById('jumpCwv');
+  const jumpCwvGoodUrls = document.getElementById('jumpCwvGoodUrls');
   const toggleFloatingBtn = document.getElementById('toggleFloatingBtn');
   const appVersion = document.getElementById('appVersion');
 
@@ -132,10 +133,42 @@ document.addEventListener('DOMContentLoaded', async () => {
               <span class="task-section">${escapeHtml(task.section)}</span>
             </div>
           </div>
-          <span class="task-count">${escapeHtml(task.count || '')}</span>
+          <div class="task-right">
+            ${task.targetUrl ? `<button type="button" class="btn-load-page" data-url="${escapeHtml(task.targetUrl)}" title="Load this report in tab">Load ↗</button>` : ''}
+            <span class="task-count">${escapeHtml(task.count || '')}</span>
+          </div>
         `;
         const cb = labelEl.querySelector('.task-checkbox');
         cb.addEventListener('change', updateSelectedCountBadge);
+
+        // Click on "Load ↗" button directly loads that report URL into the active tab
+        const loadBtn = labelEl.querySelector('.btn-load-page');
+        if (loadBtn) {
+          loadBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const url = loadBtn.getAttribute('data-url');
+            if (url && activeTab) {
+              chrome.tabs.update(activeTab.id, { url });
+              window.close();
+            }
+          });
+        }
+
+        // Clicking the task label on tasks that have a targetUrl also navigates to that report
+        const taskTexts = labelEl.querySelector('.task-texts');
+        if (taskTexts && task.targetUrl) {
+          taskTexts.style.cursor = 'pointer';
+          taskTexts.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (activeTab && task.targetUrl) {
+              chrome.tabs.update(activeTab.id, { url: task.targetUrl });
+              window.close();
+            }
+          });
+        }
+
         tasksChecklistContainer.appendChild(labelEl);
       });
       updateSelectedCountBadge();
@@ -220,27 +253,39 @@ document.addEventListener('DOMContentLoaded', async () => {
     const userMatch = activeTab?.url?.match(/search\.google\.com(\/u\/\d+|\/b\/\d+)?\/search-console/);
     const basePath = userMatch && userMatch[1] ? `${userMatch[1]}/search-console` : '/search-console';
     let searchQuery = '';
+    let resourceId = '';
     try {
-      searchQuery = activeTab?.url ? new URL(activeTab.url).search : '';
+      if (activeTab?.url) {
+        const u = new URL(activeTab.url);
+        searchQuery = u.search || '';
+        resourceId = u.searchParams.get('resource_id') || '';
+      }
     } catch (e) {}
+
+    function buildTargetUrl(tgt) {
+      if (tgt === 'page-indexing') return `https://search.google.com${basePath}/index${searchQuery}`;
+      if (tgt === 'crawl-stats') return `https://search.google.com${basePath}/settings/crawl-stats${searchQuery}`;
+      if (tgt === 'core-web-vitals') return `https://search.google.com${basePath}/core-web-vitals${searchQuery}`;
+      if (tgt === 'cwv-good-urls-mobile' || tgt === 'cwv-good-urls') {
+        const resParam = resourceId ? `?resource_id=${encodeURIComponent(resourceId)}&device=2` : searchQuery;
+        return `https://search.google.com${basePath}/core-web-vitals/drilldown${resParam}`;
+      }
+      if (tgt === 'cwv-good-urls-desktop') {
+        const resParam = resourceId ? `?resource_id=${encodeURIComponent(resourceId)}&device=1` : searchQuery;
+        return `https://search.google.com${basePath}/core-web-vitals/drilldown${resParam}`;
+      }
+      return `https://search.google.com${basePath}/core-web-vitals${searchQuery}`;
+    }
 
     if (activeTab && activeTab.url && isGscUrl(activeTab.url)) {
       chrome.tabs.sendMessage(activeTab.id, { action: 'NAVIGATE_TO', target }, (res) => {
         if (chrome.runtime.lastError || !res?.success) {
-          let subPath = '';
-          if (target === 'page-indexing') subPath = '/index';
-          if (target === 'crawl-stats') subPath = '/settings/crawl-stats';
-          if (target === 'core-web-vitals') subPath = '/core-web-vitals';
-          chrome.tabs.update(activeTab.id, { url: `https://search.google.com${basePath}${subPath}${searchQuery}` });
+          chrome.tabs.update(activeTab.id, { url: buildTargetUrl(target) });
         }
         window.close();
       });
     } else {
-      let subPath = '';
-      if (target === 'page-indexing') subPath = '/index';
-      if (target === 'crawl-stats') subPath = '/settings/crawl-stats';
-      if (target === 'core-web-vitals') subPath = '/core-web-vitals';
-      chrome.tabs.create({ url: `https://search.google.com${basePath}${subPath}${searchQuery}` });
+      chrome.tabs.create({ url: buildTargetUrl(target) });
       window.close();
     }
   }
@@ -248,6 +293,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   jumpIndexing.addEventListener('click', () => navigateToReport('page-indexing'));
   jumpCrawlStats.addEventListener('click', () => navigateToReport('crawl-stats'));
   jumpCwv.addEventListener('click', () => navigateToReport('core-web-vitals'));
+  if (jumpCwvGoodUrls) {
+    jumpCwvGoodUrls.addEventListener('click', () => navigateToReport('cwv-good-urls-mobile'));
+  }
 
   function escapeHtml(str) {
     if (!str) return '';

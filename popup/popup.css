@@ -319,6 +319,32 @@ body {
   color: var(--text-tertiary);
 }
 
+.task-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.btn-load-page {
+  background: rgba(26, 115, 232, 0.08);
+  color: var(--primary);
+  border: 1px solid rgba(26, 115, 232, 0.28);
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  cursor: pointer;
+  transition: all 0.12s ease;
+  white-space: nowrap;
+}
+
+.btn-load-page:hover {
+  background: var(--primary);
+  color: #ffffff;
+  border-color: var(--primary);
+}
+
 .task-count {
   font-size: 10px;
   font-weight: 600;
