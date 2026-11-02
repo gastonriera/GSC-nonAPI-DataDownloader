@@ -1,18 +1,18 @@
 /**
- * GSC non-API Data Downloader - Content Script (v2.1.1)
+ * GSC non-API Data Downloader - Content Script (v2.2.0)
  * Automates Google Search Console's native Export menu ("Download Excel" / "Download CSV")
  * across the main report AND all sub-reports/drilldowns for:
  * 1. Page Indexing (Indexed pages + all "Why pages aren't indexed" reason drilldowns)
  * 2. Crawl Stats (Main 90-day chart export + all 4 breakdown table drilldowns:
  *    By response, By file type, By purpose, and By Googlebot type)
- * 3. Core Web Vitals (Mobile & Desktop reports + all issue drilldowns)
+ * 3. Core Web Vitals (Mobile & Desktop reports + Good URLs + all issue drilldowns)
  */
 
 (function () {
   'use strict';
 
-  if (window.__GSC_DOWNLOADER_V211_INITIALIZED__) return;
-  window.__GSC_DOWNLOADER_V211_INITIALIZED__ = true;
+  if (window.__GSC_DOWNLOADER_V220_INITIALIZED__) return;
+  window.__GSC_DOWNLOADER_V220_INITIALIZED__ = true;
 
   let isBatchRunning = false;
   let cancelBatchRequested = false;
@@ -720,6 +720,9 @@
     if (/^(reason|response|file type|purpose|googlebot(\s+type)?|metric|status|url|rows per page|by response|by file type|by purpose|by googlebot(\s+type)?)$/i.test(label)) {
       return null;
     }
+    if (/rows per page/i.test(label) || /^\d+\s*[-–]\s*\d+\s+of\s+\d+/i.test(label)) {
+      return null;
+    }
 
     // Skip Crawl Stats Host Status rows (Robots.txt fetch, DNS resolution, Server connectivity)
     if (/^(robots\.txt fetch|dns resolution|server connectivity)$/i.test(label)) {
@@ -868,6 +871,139 @@
   }
 
   /**
+   * Finds the "View data about good URLs" button or link on the Core Web Vitals device report.
+   */
+  function findCwvGoodUrlsButton() {
+    const candidates = Array.from(document.querySelectorAll(
+      '[role="button"], a, button, [jsaction], [tabindex="0"], span, div'
+    )).filter((el) => isElementVisible(el) && !el.closest('#gsc-downloader-floating-root'));
+
+    for (const el of candidates) {
+      const txt = getCleanElementText(el);
+      const aria = (
+        el.getAttribute('aria-label') ||
+        el.getAttribute('data-tooltip') ||
+        el.getAttribute('title') ||
+        ''
+      ).toLowerCase();
+
+      if (
+        /^view data about good (urls|pages)$/i.test(txt) ||
+        /view data about good (urls|pages)/i.test(aria) ||
+        /^view good (urls|pages)$/i.test(txt) ||
+        (el.matches('button, [role="button"], a, [tabindex="0"]') && /^good (urls|pages)$/i.test(txt))
+      ) {
+        return el.closest('[role="button"], a, button, [tabindex="0"], [jsaction]') || el;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Expands a table inside a given breakdown card to 25 rows per page if a pagination selector exists.
+   */
+  async function setRowsPerPageForScope(scope, targetCount = '25') {
+    if (!scope || !isElementVisible(scope)) return false;
+
+    // 1. Check native <select>
+    const selectEl = scope.querySelector('select');
+    if (selectEl && isElementVisible(selectEl)) {
+      const opt = Array.from(selectEl.options).find(
+        (o) => o.value === targetCount || o.text.trim() === targetCount || new RegExp(`^${targetCount}\\b`).test(o.text.trim())
+      );
+      if (opt && selectEl.value !== opt.value) {
+        selectEl.value = opt.value;
+        selectEl.dispatchEvent(new Event('change', { bubbles: true }));
+        await sleep(500);
+        return true;
+      }
+      return false;
+    }
+
+    // 2. Look for pagination dropdown triggers inside scope
+    const triggerCandidates = Array.from(scope.querySelectorAll(
+      '[aria-label*="rows per page" i], [aria-label*="row" i][aria-haspopup], [role="combobox"], [aria-haspopup="listbox"], .VfPpkd-O12Habb, div[jsaction*="dropdown"], div[jsaction*="select"]'
+    )).filter((el) => isElementVisible(el) && !el.closest('#gsc-downloader-floating-root'));
+
+    // 2b. If not found by selector, find text "Rows per page" and look at its sibling/parent controls
+    if (triggerCandidates.length === 0) {
+      const textEls = Array.from(scope.querySelectorAll('span, div, p, label'))
+        .filter((el) => isElementVisible(el));
+      const rppEl = textEls.find((el) => /rows per page/i.test(getCleanElementText(el)));
+      if (rppEl) {
+        const parent = rppEl.closest('footer, [role="toolbar"], div') || rppEl.parentElement;
+        if (parent) {
+          const subTriggers = Array.from(parent.querySelectorAll(
+            '[role="button"], button, [role="combobox"], [aria-haspopup], div[tabindex="0"]'
+          )).filter((el) => isElementVisible(el) && !el.contains(rppEl) && el !== rppEl);
+          triggerCandidates.push(...subTriggers);
+        }
+      }
+    }
+
+    if (triggerCandidates.length === 0) return false;
+
+    const trigger = triggerCandidates[0];
+    const triggerText = getCleanElementText(trigger);
+
+    // If already displaying 25, return true
+    if (triggerText === targetCount || new RegExp(`^${targetCount}\\b`).test(triggerText)) {
+      return true;
+    }
+
+    // Click the combobox to open the dropdown menu
+    dispatchRealClick(trigger);
+    await sleep(400);
+
+    // Find the option for "25" across document
+    const optionCandidates = Array.from(document.querySelectorAll(
+      '[role="option"], [role="menuitem"], .VfPpkd-Listitem, [data-value="25"], li, div[jsaction*="click"], span'
+    )).filter((el) => isElementVisible(el) && !el.closest('#gsc-downloader-floating-root'));
+
+    const opt25 = optionCandidates.find((el) => {
+      const txt = getCleanElementText(el);
+      const val = el.getAttribute('data-value') || '';
+      return txt === targetCount || val === targetCount || new RegExp(`^${targetCount}(\\s|$)`).test(txt);
+    });
+
+    if (opt25) {
+      dispatchRealClick(opt25);
+      await sleep(650);
+      return true;
+    } else {
+      // Close the menu if option was not found
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+      await sleep(200);
+    }
+
+    return false;
+  }
+
+  /**
+   * Expands each of the four Crawl Stats breakdown cards to 25 rows per page.
+   */
+  async function expandAllCrawlStatsBreakdownsTo25() {
+    const headings = findCrawlStatsBreakdownHeadings();
+    if (headings.length === 0) return false;
+
+    let anyChanged = false;
+    for (const item of headings) {
+      const scopes = getBreakdownCardScopeElements(item, headings);
+      for (const scope of scopes) {
+        try {
+          const changed = await setRowsPerPageForScope(scope, '25');
+          if (changed) anyChanged = true;
+        } catch (e) {}
+      }
+    }
+
+    if (anyChanged) {
+      await sleep(500);
+    }
+    return anyChanged;
+  }
+
+  /**
    * Finds all clickable drilldown rows in tables on the current Overview page:
    * - Page Indexing: "Why pages aren't indexed", "Improve page experience"
    * - Crawl Stats: "By response", "By file type", "By purpose", "By Googlebot type"
@@ -880,13 +1016,12 @@
     const discoveredRows = [];
     const seenKeys = new Set();
 
-    // On Crawl Stats, first run the dedicated 4-breakdown scanner (By response, By file type, By purpose, By Googlebot type)
+    // On Crawl Stats, strictly use the 4-breakdown scanner (By response, By file type, By purpose, By Googlebot type)
     if (reportInfo.reportType === 'crawl-stats') {
-      const breakdownRows = findCrawlStatsBreakdownRows();
-      breakdownRows.forEach((r) => {
-        seenKeys.add(r.key);
-        discoveredRows.push(r);
-      });
+      const VALID_CRAWL_BREAKDOWNS = ['By response', 'By file type', 'By purpose', 'By Googlebot type'];
+      return findCrawlStatsBreakdownRows().filter((r) =>
+        VALID_CRAWL_BREAKDOWNS.includes(r.section)
+      );
     }
 
     // Query document directly (filtered by isElementVisible) so nested <c-wiz> cards are never missed
@@ -1063,8 +1198,14 @@
         });
       }
 
-      const rows = findClickableTableRows(reportInfo);
-      rows.forEach((r) => {
+      // Strictly include ONLY rows belonging to the four crawl request breakdown categories:
+      // (Total exports strictly equals: sum of all 4 breakdown rows + 1)
+      const VALID_CRAWL_BREAKDOWNS = ['By response', 'By file type', 'By purpose', 'By Googlebot type'];
+      const breakdownRows = findCrawlStatsBreakdownRows().filter((r) =>
+        VALID_CRAWL_BREAKDOWNS.includes(r.section)
+      );
+
+      breakdownRows.forEach((r) => {
         tasks.push({
           id: `row::${r.key}`,
           type: 'table-row',
@@ -1088,7 +1229,7 @@
             type: 'cwv-device',
             device: b.device,
             section: 'Core Web Vitals',
-            label: `${b.device} Report (+ Issue Drilldowns)`,
+            label: `${b.device} Report (+ Good URLs & Issue Drilldowns)`,
             count: 'Full Report'
           });
         });
@@ -1103,6 +1244,18 @@
           section: reportInfo.subView,
           label: `${reportInfo.subView} Summary`,
           count: 'Main'
+        });
+      }
+
+      // Check if "Good URLs" report button is present on this device view
+      const goodUrlsBtn = findCwvGoodUrlsButton();
+      if (goodUrlsBtn) {
+        tasks.push({
+          id: 'cwv-good-urls',
+          type: 'cwv-good-urls-btn',
+          section: reportInfo.subView || 'Good URLs',
+          label: 'Good URLs (View data about good URLs)',
+          count: 'Good URLs'
         });
       }
 
@@ -1322,7 +1475,7 @@
     const selectedTaskIds = options.selectedTaskIds || null; // null = run all discovered tasks
     const currentViewOnly = options.currentViewOnly === true;
 
-    const { reportInfo, tasks: allTasks } = discoverExportTasks();
+    let { reportInfo, tasks: allTasks } = discoverExportTasks();
 
     if (currentViewOnly) {
       showProgressPanel(1, 1, `Exporting ${reportInfo.reportName} (${format.toUpperCase()})...`);
@@ -1339,6 +1492,15 @@
         showToast(res.error || 'Export button not available on this view.', 'error');
       }
       return res;
+    }
+
+    // On Crawl Stats, at the very beginning expand all breakdown tables to 25 rows per page
+    if (reportInfo.reportType === 'crawl-stats' && !reportInfo.isDrilldown) {
+      showProgressPanel(1, 1, 'Expanding breakdown tables to 25 rows per page...');
+      await expandAllCrawlStatsBreakdownsTo25();
+      const refreshed = discoverExportTasks();
+      reportInfo = refreshed.reportInfo;
+      allTasks = refreshed.tasks;
     }
 
     const tasksToRun = selectedTaskIds
@@ -1407,6 +1569,46 @@
                 reportName: reportInfo.reportName,
                 section: 'Indexed_Pages',
                 label: 'Indexed_Pages',
+                index: fileIndex
+              },
+              overviewState.exportBtn
+            );
+            if (res.success) {
+              exportedCount++;
+              fileIndex++;
+            } else {
+              skippedCount++;
+            }
+            await returnToViewState(overviewState);
+          } else {
+            skippedCount++;
+          }
+          continue;
+        }
+
+        // 2b. "View data about good URLs" button on Core Web Vitals
+        if (task.type === 'cwv-good-urls-btn') {
+          const overviewState = captureViewState();
+          const goodBtn = findCwvGoodUrlsButton();
+          if (!goodBtn) {
+            skippedCount++;
+            continue;
+          }
+
+          dispatchRealClick(goodBtn);
+          await sleep(400);
+          if (isAtViewState(overviewState)) {
+            try { goodBtn.click(); } catch (e) {}
+          }
+
+          const changed = await waitForViewChange(overviewState, 7000);
+          if (changed) {
+            const res = await triggerSingleNativeExport(
+              format,
+              {
+                reportName: 'Core_Web_Vitals',
+                section: task.section || 'Good_URLs',
+                label: 'Good_URLs',
                 index: fileIndex
               },
               overviewState.exportBtn
@@ -1497,6 +1699,37 @@
             if (summaryRes.success) {
               exportedCount++;
               fileIndex++;
+            }
+
+            // Also check for and export Good URLs report if available for this device
+            const goodUrlsBtn = findCwvGoodUrlsButton();
+            if (goodUrlsBtn) {
+              showProgressPanel(i + 1, tasksToRun.length, `CWV ${task.device}: Good URLs Report`);
+              const preGoodState = captureViewState();
+              dispatchRealClick(goodUrlsBtn);
+              await sleep(400);
+              if (isAtViewState(preGoodState)) {
+                try { goodUrlsBtn.click(); } catch (e) {}
+              }
+
+              const enteredGood = await waitForViewChange(preGoodState, 7000);
+              if (enteredGood) {
+                const goodRes = await triggerSingleNativeExport(
+                  format,
+                  {
+                    reportName: 'Core_Web_Vitals',
+                    section: task.device,
+                    label: 'Good_URLs',
+                    index: fileIndex
+                  },
+                  preGoodState.exportBtn
+                );
+                if (goodRes.success) {
+                  exportedCount++;
+                  fileIndex++;
+                }
+                await returnToViewState(preGoodState);
+              }
             }
 
             // Also export each issue drilldown row inside this Device Report
@@ -1690,20 +1923,26 @@
       const action = request.action;
 
       if (action === 'PING') {
-        const ver = (isExtensionValid() && chrome.runtime?.getManifest) ? chrome.runtime.getManifest().version : '2.1.1';
+        const ver = (isExtensionValid() && chrome.runtime?.getManifest) ? chrome.runtime.getManifest().version : '2.2.0';
         sendResponse({ pong: true, version: ver });
         return true;
       }
 
       if (action === 'GET_STATUS') {
-        const { reportInfo, tasks } = discoverExportTasks();
-        sendResponse({
-          reportInfo,
-          tasks,
-          nativeExportAvailable: !!findVisibleExportButton(),
-          isBatchRunning,
-          batchProgressState
-        });
+        (async () => {
+          const currentInfo = detectReportInfo();
+          if (currentInfo.reportType === 'crawl-stats' && !currentInfo.isDrilldown) {
+            await expandAllCrawlStatsBreakdownsTo25();
+          }
+          const { reportInfo: freshReportInfo, tasks } = discoverExportTasks();
+          sendResponse({
+            reportInfo: freshReportInfo,
+            tasks,
+            nativeExportAvailable: !!findVisibleExportButton(),
+            isBatchRunning,
+            batchProgressState
+          });
+        })();
         return true;
       }
 
