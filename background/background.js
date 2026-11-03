@@ -1,5 +1,5 @@
 /**
- * GSC non-API Data Downloader - Background Service Worker (v3.1.0)
+ * GSC non-API Data Downloader - Background Service Worker (v3.1.1)
  * Coordinates script injection, detects native GSC downloads, and renames/organizes
  * exported Excel (.xlsx) and CSV (.zip) files into clean folders.
  */

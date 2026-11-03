@@ -1,5 +1,5 @@
 /**
- * GSC non-API Data Downloader - Content Script (v3.1.0)
+ * GSC non-API Data Downloader - Content Script (v3.1.1)
  * Automates Google Search Console's native Export menu ("Download Excel" / "Download CSV")
  * across the main report AND all sub-reports/drilldowns for:
  * 1. Page Indexing (Indexed pages + all "Why pages aren't indexed" reason drilldowns)
@@ -12,8 +12,8 @@
 (function () {
   'use strict';
 
-  if (window.__GSC_DOWNLOADER_V310_INITIALIZED__) return;
-  window.__GSC_DOWNLOADER_V310_INITIALIZED__ = true;
+  if (window.__GSC_DOWNLOADER_V311_INITIALIZED__) return;
+  window.__GSC_DOWNLOADER_V311_INITIALIZED__ = true;
 
   let isBatchRunning = false;
   let cancelBatchRequested = false;
@@ -2265,26 +2265,20 @@
       const action = request.action;
 
       if (action === 'PING') {
-        const ver = (isExtensionValid() && chrome.runtime?.getManifest) ? chrome.runtime.getManifest().version : '3.1.0';
+        const ver = (isExtensionValid() && chrome.runtime?.getManifest) ? chrome.runtime.getManifest().version : '3.1.1';
         sendResponse({ pong: true, version: ver });
         return true;
       }
 
       if (action === 'GET_STATUS') {
-        (async () => {
-          const currentInfo = detectReportInfo();
-          if (currentInfo.reportType === 'crawl-stats' && !currentInfo.isDrilldown) {
-            await expandAllCrawlStatsBreakdownsTo25();
-          }
-          const { reportInfo: freshReportInfo, tasks } = discoverExportTasks();
-          sendResponse({
-            reportInfo: freshReportInfo,
-            tasks,
-            nativeExportAvailable: !!findVisibleExportButton(),
-            isBatchRunning,
-            batchProgressState
-          });
-        })();
+        const { reportInfo, tasks } = discoverExportTasks();
+        sendResponse({
+          reportInfo,
+          tasks,
+          nativeExportAvailable: !!findVisibleExportButton(),
+          isBatchRunning,
+          batchProgressState
+        });
         return true;
       }
 

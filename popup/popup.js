@@ -1,5 +1,5 @@
 /**
- * GSC non-API Data Downloader - Popup Controller (v3.1.0)
+ * GSC non-API Data Downloader - Popup Controller (v3.1.1)
  * Controls native report & drilldown export selection and format preferences.
  */
 
@@ -223,14 +223,15 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Trigger Batch Export (Main + Checked Drilldowns)
   btnExportBatch.addEventListener('click', () => {
     const checkboxes = Array.from(tasksChecklistContainer.querySelectorAll('.task-checkbox'));
-    const selectedTaskIds = checkboxes
-      .filter((cb) => cb.checked)
-      .map((cb) => cb.getAttribute('data-task-id'));
+    const allChecked = checkboxes.length > 0 && checkboxes.every((cb) => cb.checked);
+    const selectedTaskIds = allChecked
+      ? null
+      : checkboxes.filter((cb) => cb.checked).map((cb) => cb.getAttribute('data-task-id'));
 
     chrome.tabs.sendMessage(activeTab.id, {
       action: 'START_BATCH_EXPORT',
       format: selectedFormat,
-      selectedTaskIds: selectedTaskIds.length > 0 ? selectedTaskIds : null,
+      selectedTaskIds: selectedTaskIds && selectedTaskIds.length > 0 ? selectedTaskIds : null,
       currentViewOnly: false
     });
 
