@@ -1,5 +1,5 @@
 /**
- * GSC non-API Data Downloader - Content Script (v3.1.2)
+ * GSC non-API Data Downloader - Content Script (v3.1.3)
  * Automates Google Search Console's native Export menu ("Download Excel" / "Download CSV")
  * across the main report AND all sub-reports/drilldowns for:
  * 1. Page Indexing (Indexed pages + all "Why pages aren't indexed" reason drilldowns)
@@ -12,8 +12,8 @@
 (function () {
   'use strict';
 
-  if (window.__GSC_DOWNLOADER_V312_INITIALIZED__) return;
-  window.__GSC_DOWNLOADER_V312_INITIALIZED__ = true;
+  if (window.__GSC_DOWNLOADER_V313_INITIALIZED__) return;
+  window.__GSC_DOWNLOADER_V313_INITIALIZED__ = true;
 
   let isBatchRunning = false;
   let cancelBatchRequested = false;
@@ -1064,6 +1064,16 @@
     const blocks = [];
     const seenElements = new Set();
 
+    // 0. Explicit Angular Material paginators
+    const explicitPaginators = Array.from(document.querySelectorAll('mat-paginator, .mat-mdc-paginator, .mat-paginator'))
+      .filter((el) => isElementVisible(el) && !el.closest('#gsc-downloader-floating-root'));
+    for (const p of explicitPaginators) {
+      if (!seenElements.has(p)) {
+        seenElements.add(p);
+        blocks.push(p);
+      }
+    }
+
     // 1. Find elements matching range pattern (e.g. "1–10 of 42" or "1–10 de 42")
     const allTextNodes = Array.from(document.querySelectorAll('span, div, p, label, footer, [role="toolbar"]'))
       .filter((el) => {
@@ -1079,7 +1089,7 @@
     );
 
     for (const rangeEl of innermostRanges) {
-      let container = rangeEl.closest('footer, [role="toolbar"], div[jscontroller], div[jsmodel]') || rangeEl.parentElement;
+      let container = rangeEl.closest('mat-paginator, footer, [role="toolbar"], div[jscontroller], div[jsmodel]') || rangeEl.parentElement;
       while (container && container.parentElement && container.parentElement !== document.body) {
         if (container.querySelector('tbody, table, [role="grid"], [role="table"]')) {
           break;
@@ -1090,7 +1100,7 @@
         container = container.parentElement;
       }
 
-      if (container && !seenElements.has(container)) {
+      if (container && !seenElements.has(container) && !blocks.some((b) => b === container || b.contains(container))) {
         seenElements.add(container);
         blocks.push(container);
       }
@@ -1106,8 +1116,8 @@
       });
 
     for (const lbl of labelNodes) {
-      const container = lbl.closest('footer, [role="toolbar"], div') || lbl.parentElement;
-      if (container && !seenElements.has(container) && !blocks.some((b) => b.contains(container) || container.contains(b))) {
+      const container = lbl.closest('mat-paginator, footer, [role="toolbar"], div') || lbl.parentElement;
+      if (container && !seenElements.has(container) && !blocks.some((b) => b === container || b.contains(container) || container.contains(b))) {
         seenElements.add(container);
         blocks.push(container);
       }
@@ -1125,15 +1135,24 @@
     // 1. Native <select> element
     const selectEl = block.querySelector('select');
     if (selectEl && isElementVisible(selectEl)) {
-      return { type: 'select', element: selectEl };
+      return { type: 'select', element: selectEl, container: selectEl };
     }
 
-    // 2. Dropdown combobox / button controls
+    // 2. Angular Material / MDC Select components
+    const matSelect = block.querySelector('mat-select, .mat-mdc-select, .mat-select');
+    if (matSelect && isElementVisible(matSelect)) {
+      const innerTrigger = matSelect.querySelector('.mat-mdc-select-trigger, .mat-select-trigger, [role="combobox"]') || matSelect;
+      return { type: 'custom', element: innerTrigger, container: matSelect };
+    }
+
+    // 3. Dropdown combobox / button controls
     const triggerSelectors = [
       '[role="combobox"]',
       '[aria-haspopup="listbox"]',
       '[aria-haspopup="true"]',
       '[aria-expanded]',
+      '.mat-mdc-select-trigger',
+      '.mat-select-trigger',
       '.VfPpkd-O12Habb',
       '.VfPpkd-T0kwAb',
       '[jsaction*="dropdown"]',
@@ -1150,21 +1169,21 @@
       .filter((el) => isElementVisible(el) && !el.closest('#gsc-downloader-floating-root'));
 
     if (candidates.length > 0) {
-      return { type: 'custom', element: candidates[0] };
+      return { type: 'custom', element: candidates[0], container: candidates[0].closest('mat-select') || candidates[0] };
     }
 
-    // 3. Look for any button/div displaying current page size numbers ("5", "10", "20", "25", "50", "100")
+    // 4. Look for any button/div displaying current page size numbers ("5", "10", "20", "25", "50", "100")
     const allClickable = Array.from(block.querySelectorAll('button, [role="button"], div[tabindex="0"], div[jsaction], span[tabindex="0"]'))
       .filter((el) => isElementVisible(el) && !el.closest('#gsc-downloader-floating-root'));
 
     for (const el of allClickable) {
-      const txt = getCleanElementText(el);
+      const txt = getCleanElementText(el).trim();
       if (/^(5|10|20|25|50|100)$/.test(txt) || /^(5|10|20|25|50|100)\s*(rows|filas)?$/i.test(txt)) {
-        return { type: 'custom', element: el };
+        return { type: 'custom', element: el, container: el.closest('mat-select') || el };
       }
     }
 
-    // 4. Sibling search relative to "Rows per page" or "Filas por página" text node
+    // 5. Sibling search relative to "Rows per page" or "Filas por página" text node
     const textEls = Array.from(block.querySelectorAll('span, div, p, label'))
       .filter((el) => isElementVisible(el) && PAGINATION_LABEL_REGEX.test(getCleanElementText(el)));
 
@@ -1172,8 +1191,8 @@
       let sib = txtEl.nextElementSibling;
       while (sib) {
         if (isElementVisible(sib)) {
-          const innerTrigger = sib.querySelector('button, [role="combobox"], [role="button"], div[jsaction]') || sib;
-          return { type: 'custom', element: innerTrigger };
+          const innerTrigger = sib.querySelector('mat-select, button, [role="combobox"], [role="button"], div[jsaction]') || sib;
+          return { type: 'custom', element: innerTrigger, container: sib };
         }
         sib = sib.nextElementSibling;
       }
@@ -1184,11 +1203,14 @@
 
   /**
    * Expands a single pagination block to 25 rows per page.
+   * Accurately scopes searching to the opened dropdown overlay panel and dispatches
+   * pointer, mouse, and keyboard interaction to reliably select the "25" option.
    */
   async function expandPaginationBlockTo25(block) {
     const triggerInfo = findDropdownTriggerInPaginationBlock(block);
     if (!triggerInfo) return false;
 
+    // A. Native <select> element
     if (triggerInfo.type === 'select') {
       const selectEl = triggerInfo.element;
       const opt = Array.from(selectEl.options).find(
@@ -1204,55 +1226,201 @@
     }
 
     const trigger = triggerInfo.element;
-    const curText = getCleanElementText(trigger);
+    const curText = getCleanElementText(trigger).trim();
+    const blockText = getCleanElementText(block);
 
-    // If already showing "25", no expansion needed
-    if (curText === '25' || /^25\b/.test(curText)) {
+    // If already showing "25" or range already reflects 25 (e.g. "1–25"), no expansion needed
+    if (
+      curText === '25' ||
+      /^25\b/.test(curText) ||
+      /\b1\s*[-–]\s*25\b/.test(blockText) ||
+      /rows per page:\s*25\b/i.test(blockText) ||
+      /filas por página:\s*25\b/i.test(blockText)
+    ) {
       return true;
     }
 
+    // Ensure trigger is in view
     trigger.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-    await sleep(100);
+    await sleep(80);
 
     // Click the trigger to open the dropdown menu
-    dispatchRealClick(trigger);
+    const rect = trigger.getBoundingClientRect();
+    const x = rect.left + rect.width / 2;
+    const y = rect.top + rect.height / 2;
+
+    const clickOpts = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      view: window,
+      clientX: x,
+      clientY: y,
+      screenX: x,
+      screenY: y,
+      button: 0,
+      buttons: 1
+    };
+
+    trigger.dispatchEvent(new PointerEvent('pointerdown', clickOpts));
+    trigger.dispatchEvent(new MouseEvent('mousedown', clickOpts));
+    await sleep(35);
+    trigger.dispatchEvent(new PointerEvent('pointerup', { ...clickOpts, buttons: 0 }));
+    trigger.dispatchEvent(new MouseEvent('mouseup', { ...clickOpts, buttons: 0 }));
+    trigger.dispatchEvent(new MouseEvent('click', { ...clickOpts, buttons: 0 }));
     try { trigger.click(); } catch (e) {}
 
-    // Dispatch ArrowDown / Enter on the trigger to ensure Closure / Wiz opens the listbox
-    const downOpts = { key: 'ArrowDown', code: 'ArrowDown', keyCode: 40, which: 40, bubbles: true, cancelable: true };
-    trigger.dispatchEvent(new KeyboardEvent('keydown', downOpts));
-    trigger.dispatchEvent(new KeyboardEvent('keyup', downOpts));
+    // If trigger has a parent container (like <mat-select>), also click it if not open
+    if (triggerInfo.container && triggerInfo.container !== trigger) {
+      try { triggerInfo.container.click(); } catch (e) {}
+    }
 
-    await sleep(350);
+    // Poll for the opened dropdown overlay panel to appear (up to 2000ms)
+    let activePanel = null;
+    let opt25 = null;
 
-    // Look for the "25" option across the entire document (menus are appended to body)
-    const optionSelectors = [
-      '[role="option"]',
-      '[role="menuitem"]',
-      '.VfPpkd-Listitem',
-      '.VfPpkd-A9uggb-menu-item',
-      '[data-value="25"]',
-      'li',
-      'div[jsaction*="click"]',
-      'span'
-    ];
+    for (let attempt = 0; attempt < 20; attempt++) {
+      await sleep(100);
 
-    const optionCandidates = Array.from(document.querySelectorAll(optionSelectors.join(',')))
-      .filter((el) => isMenuElementVisible(el) && !el.closest('#gsc-downloader-floating-root'));
+      // Find active overlay panels (Angular CDK overlay, Material select panel, Wiz listbox/menu)
+      const panelSelectors = [
+        'div.cdk-overlay-pane:not([style*="display: none"])',
+        'div.cdk-overlay-container [role="listbox"]',
+        'div.mat-mdc-select-panel',
+        'div.mat-select-panel',
+        '[role="listbox"]',
+        '[role="menu"]',
+        '.VfPpkd-xl07Ob-XxIAqe',
+        '.goog-menu'
+      ];
 
-    const opt25 = optionCandidates.find((el) => {
-      const val = el.getAttribute('data-value') || '';
-      const txt = getCleanElementText(el);
-      return val === '25' || txt === '25' || /^25(\s|$)/.test(txt);
-    });
+      const visiblePanels = Array.from(document.querySelectorAll(panelSelectors.join(',')))
+        .filter((p) => isMenuElementVisible(p) && !p.closest('#gsc-downloader-floating-root'));
+
+      if (visiblePanels.length > 0) {
+        // Use the most recently added overlay panel
+        activePanel = visiblePanels[visiblePanels.length - 1];
+
+        // 1. Look for mat-option, [role="option"], or menu item inside this active overlay panel
+        const optionEls = Array.from(activePanel.querySelectorAll('mat-option, [role="option"], .mat-mdc-option, .mat-option, [role="menuitem"], .VfPpkd-Listitem, li'))
+          .filter((el) => isMenuElementVisible(el));
+
+        opt25 = optionEls.find((el) => {
+          const val = el.getAttribute('data-value') || el.getAttribute('value') || el.value || '';
+          if (val === '25') return true;
+          const txt = getCleanElementText(el).trim();
+          return txt === '25' || /^25\b/.test(txt);
+        });
+
+        // 2. If no option found by element tag, search any visible element inside activePanel with exact text "25"
+        if (!opt25) {
+          const allInPanel = Array.from(activePanel.querySelectorAll('*'))
+            .filter((el) => isMenuElementVisible(el));
+
+          const match = allInPanel.find((el) => {
+            const val = el.getAttribute('data-value') || '';
+            if (val === '25') return true;
+            const t = (el.textContent || '').trim();
+            return t === '25';
+          });
+
+          if (match) {
+            opt25 = match.closest('mat-option, [role="option"], .mat-mdc-option, li') || match;
+          }
+        }
+
+        if (opt25) break;
+      }
+    }
+
+    if (!opt25) {
+      // Fallback: check across document for mat-option or [role="option"] strictly (NOT general spans!)
+      const documentOptions = Array.from(document.querySelectorAll('mat-option, .mat-mdc-option, [role="option"][data-value="25"], [role="option"]'))
+        .filter((el) => isMenuElementVisible(el) && !el.closest('#gsc-downloader-floating-root'));
+
+      opt25 = documentOptions.find((el) => {
+        const val = el.getAttribute('data-value') || el.getAttribute('value') || '';
+        if (val === '25') return true;
+        const txt = getCleanElementText(el).trim();
+        return txt === '25' || /^25\b/.test(txt);
+      });
+    }
 
     if (opt25) {
-      dispatchRealClick(opt25);
+      // Focus option without scrolling
+      if (typeof opt25.focus === 'function') {
+        try { opt25.focus({ preventScroll: true }); } catch (e) {}
+      }
+
+      const optRect = opt25.getBoundingClientRect();
+      const optX = optRect.left + optRect.width / 2;
+      const optY = optRect.top + optRect.height / 2;
+
+      const optOpts = {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        view: window,
+        clientX: optX,
+        clientY: optY,
+        screenX: optX,
+        screenY: optY,
+        button: 0
+      };
+
+      // Hover / focus stage
+      opt25.dispatchEvent(new PointerEvent('pointerenter', { ...optOpts, buttons: 0 }));
+      opt25.dispatchEvent(new MouseEvent('mouseenter', { ...optOpts, buttons: 0 }));
+      opt25.dispatchEvent(new PointerEvent('pointerover', { ...optOpts, buttons: 0 }));
+      opt25.dispatchEvent(new MouseEvent('mouseover', { ...optOpts, buttons: 0 }));
+      await sleep(30);
+
+      // Press down stage
+      opt25.dispatchEvent(new PointerEvent('pointerdown', { ...optOpts, buttons: 1 }));
+      opt25.dispatchEvent(new MouseEvent('mousedown', { ...optOpts, buttons: 1 }));
+      await sleep(40);
+
+      // Release & click stage
+      opt25.dispatchEvent(new PointerEvent('pointerup', { ...optOpts, buttons: 0 }));
+      opt25.dispatchEvent(new MouseEvent('mouseup', { ...optOpts, buttons: 0 }));
+      opt25.dispatchEvent(new MouseEvent('click', { ...optOpts, buttons: 0 }));
+
+      // Native .click()
       try { opt25.click(); } catch (e) {}
-      await sleep(650);
+
+      // Click inner text span if present
+      const innerTextSpan = opt25.querySelector('.mdc-list-item__primary-text, .mat-mdc-option-text, .mat-option-text, span');
+      if (innerTextSpan && innerTextSpan !== opt25) {
+        try {
+          innerTextSpan.dispatchEvent(new MouseEvent('click', { ...optOpts, buttons: 0 }));
+          innerTextSpan.click();
+        } catch (e) {}
+      }
+
+      // Dispatch Enter and Space key events on the option
+      const enterOpts = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
+      opt25.dispatchEvent(new KeyboardEvent('keydown', enterOpts));
+      opt25.dispatchEvent(new KeyboardEvent('keypress', enterOpts));
+      opt25.dispatchEvent(new KeyboardEvent('keyup', enterOpts));
+
+      const spaceOpts = { key: ' ', code: 'Space', keyCode: 32, which: 32, bubbles: true, cancelable: true };
+      opt25.dispatchEvent(new KeyboardEvent('keydown', spaceOpts));
+      opt25.dispatchEvent(new KeyboardEvent('keyup', spaceOpts));
+
+      // Wait 500ms for GSC to update table data to 25 rows
+      await sleep(500);
+
+      // If the overlay panel is still open, close it cleanly with Escape
+      const lingeringPanel = Array.from(document.querySelectorAll('[role="listbox"], .mat-mdc-select-panel, .mat-select-panel'))
+        .find((p) => isMenuElementVisible(p));
+      if (lingeringPanel) {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+        await sleep(150);
+      }
+
       return true;
     } else {
-      // Close open dropdown with Escape
+      // If 25 option was not found, close the opened dropdown with Escape
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
       await sleep(150);
     }
@@ -2265,7 +2433,7 @@
       const action = request.action;
 
       if (action === 'PING') {
-        const ver = (isExtensionValid() && chrome.runtime?.getManifest) ? chrome.runtime.getManifest().version : '3.1.2';
+        const ver = (isExtensionValid() && chrome.runtime?.getManifest) ? chrome.runtime.getManifest().version : '3.1.3';
         sendResponse({ pong: true, version: ver });
         return true;
       }
