@@ -1,6 +1,7 @@
 /**
- * GSC non-API Data Downloader - Popup Controller (v3.1.1)
- * Controls native report & drilldown export selection and format preferences.
+ * GSC non-API Data Downloader - Popup Controller (v3.1.2)
+ * Controls native report & drilldown export selection, format preferences,
+ * and macOS silent download configuration.
  */
 
 document.addEventListener('DOMContentLoaded', async () => {
@@ -19,11 +20,17 @@ document.addEventListener('DOMContentLoaded', async () => {
   const btnExportCurrentOnly = document.getElementById('btnExportCurrentOnly');
   const btnCurrentOnlyText = document.getElementById('btnCurrentOnlyText');
 
+  const macOsHelpCard = document.getElementById('macOsHelpCard');
+  const btnDismissMacHelp = document.getElementById('btnDismissMacHelp');
+  const btnCopySettingsUrl = document.getElementById('btnCopySettingsUrl');
+  const copySettingsText = document.getElementById('copySettingsText');
+
   const jumpIndexing = document.getElementById('jumpIndexing');
   const jumpCrawlStats = document.getElementById('jumpCrawlStats');
   const jumpCwv = document.getElementById('jumpCwv');
   const jumpCwvGoodUrls = document.getElementById('jumpCwvGoodUrls');
   const toggleFloatingBtn = document.getElementById('toggleFloatingBtn');
+  const toggleSubfolder = document.getElementById('toggleSubfolder');
   const appVersion = document.getElementById('appVersion');
 
   let activeTab = null;
@@ -32,6 +39,56 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   if (appVersion && chrome.runtime?.getManifest) {
     appVersion.textContent = 'v' + chrome.runtime.getManifest().version;
+  }
+
+  // Detect macOS to surface silent download guidance
+  const isMac = Boolean(
+    (navigator.userAgentData && navigator.userAgentData.platform === 'macOS') ||
+    /Macintosh|MacIntel|MacPPC|Mac68K/i.test(navigator.userAgent || navigator.platform || '')
+  );
+
+  if (isMac && macOsHelpCard) {
+    chrome.storage.local.get({ hideMacHelp: false }, (res) => {
+      if (!res.hideMacHelp) {
+        macOsHelpCard.style.display = 'flex';
+      }
+    });
+  }
+
+  if (btnDismissMacHelp) {
+    btnDismissMacHelp.addEventListener('click', () => {
+      if (macOsHelpCard) macOsHelpCard.style.display = 'none';
+      chrome.storage.local.set({ hideMacHelp: true });
+    });
+  }
+
+  if (btnCopySettingsUrl) {
+    btnCopySettingsUrl.addEventListener('click', async () => {
+      const urlToCopy = 'chrome://settings/downloads';
+      try {
+        await navigator.clipboard.writeText(urlToCopy);
+        if (copySettingsText) {
+          const originalText = copySettingsText.textContent;
+          copySettingsText.textContent = '✓ Copied! Paste in new tab';
+          setTimeout(() => {
+            copySettingsText.textContent = originalText;
+          }, 2500);
+        }
+      } catch (err) {
+        const ta = document.createElement('textarea');
+        ta.value = urlToCopy;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        ta.remove();
+        if (copySettingsText) {
+          copySettingsText.textContent = '✓ Copied!';
+          setTimeout(() => {
+            copySettingsText.textContent = 'Copy chrome://settings/downloads';
+          }, 2500);
+        }
+      }
+    });
   }
 
   function isGscUrl(url) {
@@ -49,8 +106,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // Load saved preferences
-  chrome.storage.local.get({ showFloatingButton: true, exportFormat: 'excel' }, (res) => {
+  chrome.storage.local.get({ showFloatingButton: true, exportFormat: 'excel', organizeSubfolder: true }, (res) => {
     toggleFloatingBtn.checked = res.showFloatingButton;
+    if (toggleSubfolder) toggleSubfolder.checked = res.organizeSubfolder !== false;
     setFormatUI(res.exportFormat);
   });
 
@@ -63,6 +121,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     setFormatUI('csv');
     chrome.storage.local.set({ exportFormat: 'csv' });
   });
+
+  if (toggleSubfolder) {
+    toggleSubfolder.addEventListener('change', () => {
+      chrome.storage.local.set({ organizeSubfolder: toggleSubfolder.checked });
+    });
+  }
 
   // Get current active tab
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });

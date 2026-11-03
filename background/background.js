@@ -1,13 +1,41 @@
 /**
- * GSC non-API Data Downloader - Background Service Worker (v3.1.1)
- * Coordinates script injection, detects native GSC downloads, and renames/organizes
- * exported Excel (.xlsx) and CSV (.zip) files into clean folders.
+ * GSC non-API Data Downloader - Background Service Worker (v3.1.2)
+ * Coordinates script injection, configures automatic downloads, detects native GSC downloads,
+ * and renames/organizes exported Excel (.xlsx) and CSV (.zip) files cleanly without save dialogs.
  */
 
 let pendingDownloadMeta = null;
 let downloadWaiters = [];
 
+/**
+ * Automatically grants multi-file download permissions to Google Search Console
+ * so Chrome never pauses batch exports or prompts "Allow multiple downloads?".
+ */
+function configureSiteDownloadPermissions() {
+  if (chrome.contentSettings && chrome.contentSettings.automaticDownloads) {
+    try {
+      chrome.contentSettings.automaticDownloads.set({
+        primaryPattern: 'https://search.google.com/*',
+        setting: 'allow'
+      }, () => {
+        if (chrome.runtime.lastError) {
+          console.warn('Could not set automaticDownloads content setting:', chrome.runtime.lastError);
+        } else {
+          console.log('Automatic downloads explicitly allowed for https://search.google.com/*');
+        }
+      });
+    } catch (e) {
+      console.warn('Error setting automaticDownloads:', e);
+    }
+  }
+}
+
+// Configure site permissions on startup
+configureSiteDownloadPermissions();
+
 chrome.runtime.onInstalled.addListener((details) => {
+  configureSiteDownloadPermissions();
+
   chrome.storage.local.get(['showFloatingButton', 'exportFormat', 'organizeSubfolder'], (res) => {
     chrome.storage.local.set({
       showFloatingButton: res.showFloatingButton !== undefined ? res.showFloatingButton : true,
@@ -16,7 +44,7 @@ chrome.runtime.onInstalled.addListener((details) => {
     });
   });
 
-  console.log('GSC non-API Data Downloader installed/updated:', details.reason);
+  console.log('GSC non-API Data Downloader installed/updated (v3.1.2):', details.reason);
 });
 
 // Ensure latest content script is injected if user clicks action on an already open GSC tab
@@ -69,12 +97,18 @@ if (chrome.downloads && chrome.downloads.onCreated) {
   });
 }
 
-// Rename and organize GSC exported files into a clean folder structure (property-agnostic)
+// Rename and organize GSC exported files into clean paths without triggering save prompts
 if (chrome.downloads && chrome.downloads.onDeterminingFilename) {
   chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
+    const isFromGsc = Boolean(
+      (downloadItem.url && downloadItem.url.includes('search.google.com')) ||
+      (downloadItem.referrer && downloadItem.referrer.includes('search.google.com')) ||
+      (downloadItem.finalUrl && downloadItem.finalUrl.includes('search.google.com'))
+    );
+
     const now = Date.now();
-    // Only rename if triggered by our extension within the last 15 seconds
-    if (pendingDownloadMeta && (now - pendingDownloadMeta.timestamp < 15000)) {
+    // Only rename if triggered by our extension within the last 20 seconds
+    if (pendingDownloadMeta && (now - pendingDownloadMeta.timestamp < 20000)) {
       const meta = pendingDownloadMeta;
       pendingDownloadMeta = null;
 
@@ -98,12 +132,24 @@ if (chrome.downloads && chrome.downloads.onDeterminingFilename) {
       }
 
       const finalFileName = `${idxPrefix}${nameParts.join('__')}${ext}`;
-      const fullPath = meta.organizeSubfolder !== false
+      const useSubfolder = meta.organizeSubfolder !== false;
+      const fullPath = useSubfolder
         ? `GSC-Exports/${dateStr}/${finalFileName}`
-        : finalFileName;
+        : `GSC_${dateStr}_${finalFileName}`;
 
+      // Setting conflictAction to 'uniquify' prevents Chrome from opening a Save As collision dialog
       suggest({
         filename: fullPath,
+        conflictAction: 'uniquify'
+      });
+      return;
+    }
+
+    // For any native GSC download without metadata, ensure uniquify to prevent overwrite prompts
+    if (isFromGsc) {
+      const cleanOrigName = (downloadItem.filename || 'GSC_Export.xlsx').replace(/^.*[\\\/]/, '');
+      suggest({
+        filename: cleanOrigName,
         conflictAction: 'uniquify'
       });
       return;
@@ -122,11 +168,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'PREPARE_DOWNLOAD') {
-    pendingDownloadMeta = {
-      ...request.meta,
-      timestamp: Date.now()
-    };
-    sendResponse({ success: true });
+    chrome.storage.local.get({ organizeSubfolder: true }, (stored) => {
+      pendingDownloadMeta = {
+        ...request.meta,
+        organizeSubfolder: request.meta?.organizeSubfolder !== undefined
+          ? request.meta.organizeSubfolder
+          : stored.organizeSubfolder,
+        timestamp: Date.now()
+      };
+      sendResponse({ success: true });
+    });
     return true;
   }
 

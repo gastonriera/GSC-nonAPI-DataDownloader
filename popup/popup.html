@@ -78,6 +78,26 @@
         </button>
       </section>
 
+      <!-- macOS & Silent Downloads Guidance Card -->
+      <section id="macOsHelpCard" class="card macos-help-card" style="display: none;">
+        <div class="macos-help-header">
+          <div class="macos-help-title-group">
+            <span class="macos-icon">🍎</span>
+            <span class="macos-help-title">Silent Downloads on macOS</span>
+          </div>
+          <button type="button" id="btnDismissMacHelp" class="macos-close-btn" title="Dismiss notice">✕</button>
+        </div>
+        <p class="macos-help-desc">
+          To prevent Chrome from opening the <strong>"Save As"</strong> window for every exported file, turn <strong>OFF</strong> <em>"Ask where to save each file before downloading"</em> in Chrome Settings.
+        </p>
+        <div class="macos-help-actions">
+          <button type="button" id="btnCopySettingsUrl" class="btn-copy-settings">
+            <svg class="copy-icon" viewBox="0 0 24 24"><path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>
+            <span id="copySettingsText">Copy chrome://settings/downloads</span>
+          </button>
+        </div>
+      </section>
+
       <!-- Quick Report Switcher -->
       <section class="card jump-card">
         <h3 class="jump-title">Quick Switch Report</h3>
@@ -99,13 +119,20 @@
 
       <!-- Settings & Options Toggle -->
       <footer class="app-footer">
-        <label class="toggle-control">
-          <input type="checkbox" id="toggleFloatingBtn" checked>
-          <span class="toggle-slider"></span>
-          <span class="toggle-label">Show 1-Click floating button in GSC</span>
-        </label>
+        <div class="footer-toggles">
+          <label class="toggle-control">
+            <input type="checkbox" id="toggleFloatingBtn" checked>
+            <span class="toggle-slider"></span>
+            <span class="toggle-label">Show 1-Click floating button in GSC</span>
+          </label>
+          <label class="toggle-control">
+            <input type="checkbox" id="toggleSubfolder" checked>
+            <span class="toggle-slider"></span>
+            <span class="toggle-label">Save in subfolder (GSC-Exports/YYYY-MM-DD/)</span>
+          </label>
+        </div>
         <div class="footer-meta">
-          <span id="appVersion">v3.1.1</span>
+          <span id="appVersion">v3.1.2</span>
         </div>
       </footer>
     </main>
