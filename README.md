@@ -1,8 +1,8 @@
-# GSC non-API Data Downloader (`v3.1.7`)
+# GSC non-API Data Downloader (`v3.1.8`)
 
 A property-agnostic Chrome extension (Manifest V3) that automates **1-click native file exports (`Download Excel` / `Download CSV`)** across Google Search Console reports and all of their sub-reports/drilldowns:
 1. **Page Indexing Report** (`/index` — exports Indexed Pages + cycles through every reason in *"Why pages aren't indexed"*)
-2. **Crawl Stats Report** (`/settings/crawl-stats` — section-by-section 25-row expansion and download workflow: exports the 90-day charts overview, jumps straight to the Crawl requests breakdown, expands *"By response"* to 25 rows and downloads its data, then expands *"By file type"* to 25 rows and downloads its data, then *"By purpose"*, *"By Googlebot type"*, Host status options [*Robots.txt fetch*, *DNS resolution*, *Server connectivity*], and the Hosts table)
+2. **Crawl Stats Report** (`/settings/crawl-stats` — section-by-section 25-row expansion and download workflow: exports the 90-day charts overview, jumps straight to the Crawl requests breakdown, expands *"By response"* to 25 rows and downloads its data, then expands *"By file type"* to 25 rows and downloads its data, then *"By purpose"*, and *"By Googlebot type"* — strictly targeting only the 4 breakdown categories without clicking unrelated page buttons)
 3. **Core Web Vitals Report** (`/core-web-vitals` — opens *Mobile* and *Desktop* reports, exports summaries, issue drilldowns, and directly loads/exports the canonical **Good URLs** drilldown report for Mobile (`&device=2`) and Desktop (`&device=1`))
 
 ---
@@ -11,11 +11,11 @@ A property-agnostic Chrome extension (Manifest V3) that automates **1-click nati
 
 The official Google Search Console API does not provide endpoints for Crawl Stats, Core Web Vitals aggregates, or full Page Indexing drilldowns. In the GSC web interface, downloading all of these requires manually clicking into dozens of sub-reports and clicking `Export` → `Download Excel` one by one.
 
-**GSC non-API Data Downloader (`v3.1.7`)** automates that entire process with a single click—regardless of which domain, language, or property type is open—downloading the official Google Search Console `.xlsx` (or `.zip` CSV) files and organizing them into a clean folder in your `Downloads` directory without interrupting dialogs.
+**GSC non-API Data Downloader (`v3.1.8`)** automates that entire process with a single click—regardless of which domain, language, or property type is open—downloading the official Google Search Console `.xlsx` (or `.zip` CSV) files and organizing them into a clean folder in your `Downloads` directory without interrupting dialogs.
 
 ---
 
-## 🚀 Key Features (`v3.1.7`)
+## 🚀 Key Features (`v3.1.8`)
 
 * **🌐 100% Property- & Language-Agnostic**:
   * Works on any GSC property (Domain property, URL-prefix property, subfolder, etc.) without inspecting or depending on the domain name.
@@ -32,15 +32,15 @@ The official Google Search Console API does not provide endpoints for Crawl Stat
   * Triggers Google Search Console's official `Export` → `Download Excel` (default) or `Download CSV` menu option on each report.
 * **🔄 Automated Sub-Report & Drilldown Crawler**:
   * **Page Indexing**: Clicks into *"View data about indexed pages"* and each row in *"Why pages aren't indexed"*, triggers the native export on each drilldown, and navigates back automatically.
-  * **Crawl Stats (Section-by-Section Workflow in v3.1.7)**:
+  * **Crawl Stats (Strictly Crawl Breakdowns Workflow in v3.1.8)**:
     * **Jump to Breakdown Section**: Once the main overview file (90-day charts) is exported, the page smoothly scrolls straight down to the *"Crawl requests breakdown"* section.
-    * **Multi-Strategy Paginator & Dropdown Expansion**: Completely overhauled 25-row selector targeting utilizing ancestor containment, document order heading proximity (`compareDocumentPosition`), and positional index mapping across `findAllPaginationBlocks()`.
+    * **Strictly Scoped to Breakdown Tables**: Discovers and exports only rows belonging to the 4 crawl breakdown tables (*By response*, *By file type*, *By purpose*, *By Googlebot type*), completely eliminating attempts to click unrelated buttons, status cards, or non-breakdown options on the page.
+    * **Multi-Strategy Paginator & Dropdown Expansion**: Overhauled 25-row selector targeting utilizing ancestor containment, document order heading proximity (`compareDocumentPosition`), and positional index mapping across `findAllPaginationBlocks()`.
     * **Reliable Angular Material `<mat-select>` Activation**: Focuses host containers, triggers synthetic pointer and mouse events on both trigger and host elements, and provides keyboard `Space`/`Enter` fallbacks to reliably open Angular CDK overlay panels and select option `25`.
     * **Streamlined "By purpose" Handling**: Automatically detects that *"By purpose"* contains at most 2 rows (*Discovery* and *Refresh*), bypassing unnecessary dropdown interactions.
-    * **Interleaved Section-by-Section Processing**: Starts by expanding *"By response"* to 25 rows and immediately downloading all data from that section; then proceeds to expand *"By file type"* to 25 rows and downloads its data; then expands and downloads *"By purpose"*; then expands and downloads *"By Googlebot type"*; and finally processes Host status and Hosts.
+    * **Interleaved Section-by-Section Processing**: Starts by expanding *"By response"* to 25 rows and immediately downloading all data from that section; then proceeds to expand *"By file type"* to 25 rows and downloads its data; then expands and downloads *"By purpose"*; and finally expands and downloads *"By Googlebot type"*.
     * **State-Preserving Resiliency**: Automatically detects if GSC resets table pagination back to 10 rows when returning from drilldown pages, immediately re-expanding to 25 rows so all rows 1–25 are always clickable and exported.
     * **CDK Overlay & Backdrop Lifecycle Management**: Uses `waitForOverlaysToClose()` to ensure any lingering Angular CDK overlay panels or backdrops (`.cdk-overlay-backdrop-showing`) from previous cards are completely detached before opening subsequent dropdowns, eliminating click interception.
-    * **Includes All Page Options**: Discovers and exports the main 90-day overview chart, all rows across the 4 breakdown categories (*By response*, *By file type*, *By purpose*, *By Googlebot type*), Host status options (*Robots.txt fetch*, *DNS resolution*, *Server connectivity*), and the Hosts table.
   * **Core Web Vitals**:
     * **Canonical Good URLs Drilldown Loading**: When selecting *"View data about good URLs"*, the extension directly loads the exact canonical report URL (`/core-web-vitals/drilldown?resource_id=<property>&device=2` for Mobile, or `device=1` for Desktop).
     * **Multilingual Good URLs Detection**: Matches English (*"View data about good URLs"*), Spanish (*"Ver datos sobre las URLs correctas"*, *"URLs correctas"*), and other language variations, plus direct `href` extraction.
@@ -79,6 +79,6 @@ To ensure batch exports run completely in the background on macOS without Chrome
 
 This project follows a strict three-tier versioning system (`MAJOR.MINOR.PATCH`):
 
-* **Patch / 3rd digit (e.g., `3.1.6` → `3.1.7`):** Applied for **cosmetic changes, timing, and platform/browser behavior adjustments** — fine-tuning behavior, adjusting trigger moments, draggable floating button, format synchronization, rows-per-page selection, download dialog suppression, typography/color tweaks, or setting/menu arrangement changes.
+* **Patch / 3rd digit (e.g., `3.1.7` → `3.1.8`):** Applied for **cosmetic changes, timing, and platform/browser behavior adjustments** — fine-tuning behavior, adjusting trigger moments, draggable floating button, format synchronization, rows-per-page selection, download dialog suppression, typography/color tweaks, or setting/menu arrangement changes.
 * **Medium / 2nd digit (e.g., `3.0.0` → `3.1.0`):** Applied for **medium changes** — introducing new capabilities, new filters, new export formats, or feature additions without rewriting core architecture.
 * **Major / 1st digit (e.g., `2.2.0` → `3.0.0`):** Applied for **major changes** — fundamental code rework, major architectural refactoring, or introducing entirely new core feature suites.

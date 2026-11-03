@@ -1,19 +1,18 @@
 /**
- * GSC non-API Data Downloader - Content Script (v3.1.7)
+ * GSC non-API Data Downloader - Content Script (v3.1.8)
  * Automates Google Search Console's native Export menu ("Download Excel" / "Download CSV")
  * across the main report AND all sub-reports/drilldowns for:
  * 1. Page Indexing (Indexed pages + all "Why pages aren't indexed" reason drilldowns)
  * 2. Crawl Stats (Section-by-section 25-row pagination expansion & downloading across
- *    all crawl breakdown tables [By response, By file type, By purpose, By Googlebot type],
- *    Host status [Robots.txt fetch, DNS resolution, Server connectivity], and Hosts)
+ *    the 4 crawl breakdown tables: By response, By file type, By purpose, By Googlebot type)
  * 3. Core Web Vitals (Mobile & Desktop reports + Good URLs + all issue drilldowns)
  */
 
 (function () {
   'use strict';
 
-  if (window.__GSC_DOWNLOADER_V317_INITIALIZED__) return;
-  window.__GSC_DOWNLOADER_V317_INITIALIZED__ = true;
+  if (window.__GSC_DOWNLOADER_V318_INITIALIZED__) return;
+  window.__GSC_DOWNLOADER_V318_INITIALIZED__ = true;
 
   let isBatchRunning = false;
   let cancelBatchRequested = false;
@@ -618,13 +617,11 @@
   // --- DISCOVERING SUB-REPORTS & DRILLDOWN ROWS ---
 
   /**
-   * The Crawl Stats breakdown tables & sections in Google Search Console:
+   * The 4 Crawl Requests Breakdown sections on Crawl Stats:
    * 1. By response (Por respuesta)
    * 2. By file type (Por tipo de archivo)
    * 3. By purpose (Por finalidad / Por propósito)
    * 4. By Googlebot type (Por tipo de Googlebot / Por Googlebot)
-   * 5. Host status (Estado del host: Robots.txt fetch, DNS resolution, Server connectivity)
-   * 6. Hosts table (Hosts / Servidores)
    */
   const CRAWL_STATS_BREAKDOWNS = [
     {
@@ -646,16 +643,6 @@
       id: 'by-googlebot',
       section: 'By Googlebot type',
       regex: /(?:crawl requests:?\s*)?(?:by\s+|por\s+)?(?:googlebot(\s+type)?|tipos?\s+de\s+googlebot)/i
-    },
-    {
-      id: 'host-status',
-      section: 'Host status',
-      regex: /(?:host\s+status|estado\s+del\s+host|statut\s+de\s+l'h[oô]te|host-status)/i
-    },
-    {
-      id: 'hosts',
-      section: 'Hosts',
-      regex: /^(?:hosts|hosts\s+table|tabla\s+de\s+hosts|servidores|anfitriones)$/i
     }
   ];
 
@@ -668,25 +655,11 @@
 
   /**
    * Signature pattern matching for Crawl Stats rows to accurately categorize them
-   * even when headings are nested, translated, or styled in custom layouts.
+   * into one of the 4 breakdown categories.
    */
   function detectCrawlStatsSectionBySignature(text) {
     if (!text || typeof text !== 'string') return null;
     const clean = text.trim();
-
-    // Host status check (Robots.txt fetch, DNS resolution, Server connectivity)
-    if (
-      /(robots\.txt|dns|resoluci[oó]n|conectividad|connectivity|recuperaci[oó]n)/i.test(clean)
-    ) {
-      return 'Host status';
-    }
-
-    // Hosts check (domain / hostname format: e.g. www.reuse.mx, example.com)
-    if (
-      /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/i.test(clean)
-    ) {
-      return 'Hosts';
-    }
 
     // HTTP status codes or status strings: 200, 301, 302, 304, 404, 500, etc.
     if (
@@ -750,7 +723,7 @@
 
   /**
    * Isolates the DOM container(s) belonging specifically to a single Crawl Stats section card
-   * so rows from "By response", "By file type", "By purpose", "By Googlebot type", "Host status", etc.
+   * so rows from "By response", "By file type", "By purpose", and "By Googlebot type"
    * are cleanly separated.
    */
   function getBreakdownCardScopeElements(item, allHeadings) {
@@ -897,8 +870,8 @@
   }
 
   /**
-   * Discovers all clickable breakdown and section rows across Crawl Stats:
-   * By response, By file type, By purpose, By Googlebot type, Host status, and Hosts.
+   * Discovers all clickable table rows across the 4 Crawl Stats breakdown tables:
+   * By response, By file type, By purpose, and By Googlebot type.
    */
   function findCrawlStatsBreakdownRows() {
     const headings = findCrawlStatsBreakdownHeadings();
@@ -909,10 +882,10 @@
       const scopes = getBreakdownCardScopeElements(item, headings);
       let candidateRows = [];
 
-      // Pass 1: Standard table and ARIA rows inside this breakdown card
+      // Standard table and ARIA rows inside this breakdown card
       for (const scope of scopes) {
         const rows = Array.from(
-          scope.querySelectorAll('tbody tr, tr[role="row"], table tr, [role="row"], [role="listitem"], [role="option"]')
+          scope.querySelectorAll('tbody tr, tr[role="row"], table tr, [role="row"], [role="listitem"]')
         ).filter((r) => {
           if (!isElementVisible(r)) return false;
           if (r.closest('thead')) return false;
@@ -928,39 +901,13 @@
         (r) => !candidateRows.some((other) => other !== r && r.contains(other))
       );
 
-      let parsedForSection = [];
       for (const r of candidateRows) {
         const parsed = parseBreakdownRow(r, item.section, item.headingEl);
         if (parsed && !seenKeys.has(parsed.key)) {
           seenKeys.add(parsed.key);
-          parsedForSection.push(parsed);
+          discovered.push(parsed);
         }
       }
-
-      // Pass 2: Fallback for div/link/jsaction-based breakdown rows if Pass 1 found none in this card
-      if (parsedForSection.length === 0) {
-        let fallbackEls = [];
-        for (const scope of scopes) {
-          const els = Array.from(
-            scope.querySelectorAll('a[href], [role="link"], [role="button"], [tabindex="0"], [jsaction], div, li')
-          ).filter((el) => {
-            if (!isElementVisible(el)) return false;
-            if (el === item.headingEl || el.contains(item.headingEl) || item.headingEl.contains(el)) return false;
-            return true;
-          });
-          fallbackEls.push(...els);
-        }
-
-        for (const el of fallbackEls) {
-          const parsed = parseBreakdownRow(el, item.section, item.headingEl);
-          if (parsed && !seenKeys.has(parsed.key)) {
-            seenKeys.add(parsed.key);
-            parsedForSection.push(parsed);
-          }
-        }
-      }
-
-      discovered.push(...parsedForSection);
     }
 
     return discovered;
@@ -1687,7 +1634,7 @@
   /**
    * Finds all clickable drilldown rows in tables on the current Overview page:
    * - Page Indexing: "Why pages aren't indexed", "Improve page experience"
-   * - Crawl Stats: "By response", "By file type", "By purpose", "By Googlebot type", "Host status", "Hosts", etc.
+   * - Crawl Stats: "By response", "By file type", "By purpose", "By Googlebot type" (4 breakdown tables only)
    * - Core Web Vitals (Mobile/Desktop): "Why URLs aren't considered good"
    */
   function findClickableTableRows(reportInfo) {
@@ -1696,7 +1643,7 @@
     const discoveredRows = [];
     const seenKeys = new Set();
 
-    // 1. On Crawl Stats, first discover rows under all known Crawl Stats headings (Breakdowns, Host status, Hosts)
+    // 1. On Crawl Stats, discover rows ONLY from the 4 crawl requests breakdowns
     if (reportInfo.reportType === 'crawl-stats') {
       const breakdownRows = findCrawlStatsBreakdownRows();
       breakdownRows.forEach((r) => {
@@ -1705,6 +1652,8 @@
           discoveredRows.push(r);
         }
       });
+      // Strictly limit to the 4 crawl breakdown tables; do not scan any other page tables or buttons
+      return discoveredRows;
     }
 
     // 2. Discover any additional table rows on the current page
@@ -1877,7 +1826,7 @@
         });
       }
 
-      // Include all discovered options & breakdown rows on the page (breakdowns, Host status, Hosts, etc.)
+      // Include all discovered rows strictly from the 4 crawl requests breakdown tables
       const rows = findClickableTableRows(reportInfo);
       rows.forEach((r) => {
         tasks.push({
@@ -2211,7 +2160,7 @@
    * 4. Expands "By file type" to 25 rows -> downloads all data from "By file type".
    * 5. Expands "By purpose" to 25 rows -> downloads all data from "By purpose".
    * 6. Expands "By Googlebot type" to 25 rows -> downloads all data from "By Googlebot type".
-   * 7. Downloads all remaining sections (Host status, Hosts, etc.).
+   * Strictly limited to the 4 crawl breakdown tables; does not attempt downloading anything else.
    */
   async function runCrawlStatsSectionBySectionExport(format, selectedTaskIds, allTasks) {
     isBatchRunning = true;
@@ -2342,130 +2291,6 @@
         }
       }
 
-      // 5. Host status and Hosts sections
-      const otherSections = [
-        { id: 'host-status', name: 'Host status' },
-        { id: 'hosts', name: 'Hosts' }
-      ];
-
-      for (const section of otherSections) {
-        if (cancelBatchRequested) break;
-
-        let liveRows = findClickableTableRows(detectReportInfo());
-        let sectionRows = liveRows.filter((r) => r.section === section.name);
-
-        if (selectedTaskIds && selectedTaskIds.length > 0) {
-          sectionRows = sectionRows.filter(
-            (r) =>
-              selectedTaskIds.includes(`row::${r.key}`) ||
-              selectedTaskIds.some((id) => id.includes(r.label))
-          );
-        }
-
-        if (sectionRows.length === 0) continue;
-
-        // Try expanding if it has a paginator
-        await expandBreakdownSectionTo25(section.id, section.name);
-        liveRows = findClickableTableRows(detectReportInfo());
-        sectionRows = liveRows.filter((r) => r.section === section.name);
-
-        if (selectedTaskIds && selectedTaskIds.length > 0) {
-          sectionRows = sectionRows.filter(
-            (r) =>
-              selectedTaskIds.includes(`row::${r.key}`) ||
-              selectedTaskIds.some((id) => id.includes(r.label))
-          );
-        }
-
-        for (let j = 0; j < sectionRows.length; j++) {
-          if (cancelBatchRequested) break;
-
-          const targetRow = sectionRows[j];
-          showProgressPanel(fileIndex, null, `${section.name} (${j + 1}/${sectionRows.length}): ${targetRow.label}`);
-
-          const overviewState = captureViewState();
-          const currentRows = findClickableTableRows(detectReportInfo());
-          const rowToClick =
-            currentRows.find((r) => r.key === targetRow.key || (r.section === section.name && r.label === targetRow.label)) ||
-            targetRow;
-
-          const navigated = await openDrilldownRow(rowToClick, overviewState);
-          if (navigated) {
-            const res = await triggerSingleNativeExport(
-              format,
-              {
-                reportName: 'Crawl_Stats',
-                section: section.name,
-                label: targetRow.label,
-                index: fileIndex
-              },
-              overviewState.exportBtn
-            );
-
-            if (res.success) {
-              exportedCount++;
-              fileIndex++;
-            } else {
-              skippedCount++;
-            }
-
-            await returnToViewState(overviewState);
-            await sleep(350);
-          } else {
-            skippedCount++;
-          }
-        }
-      }
-
-      // 6. Catch any remaining rows not covered above
-      const processedSections = ['By response', 'By file type', 'By purpose', 'By Googlebot type', 'Host status', 'Hosts'];
-      const liveRemainingRows = findClickableTableRows(detectReportInfo()).filter(
-        (r) => !processedSections.includes(r.section)
-      );
-
-      for (let j = 0; j < liveRemainingRows.length; j++) {
-        if (cancelBatchRequested) break;
-
-        const targetRow = liveRemainingRows[j];
-        if (selectedTaskIds && selectedTaskIds.length > 0) {
-          if (!selectedTaskIds.includes(`row::${targetRow.key}`) && !selectedTaskIds.some((id) => id.includes(targetRow.label))) {
-            continue;
-          }
-        }
-
-        showProgressPanel(fileIndex, null, `${targetRow.section}: ${targetRow.label}`);
-        const overviewState = captureViewState();
-        const currentRows = findClickableTableRows(detectReportInfo());
-        const rowToClick =
-          currentRows.find((r) => r.key === targetRow.key || r.label === targetRow.label) || targetRow;
-
-        const navigated = await openDrilldownRow(rowToClick, overviewState);
-        if (navigated) {
-          const res = await triggerSingleNativeExport(
-            format,
-            {
-              reportName: 'Crawl_Stats',
-              section: targetRow.section,
-              label: targetRow.label,
-              index: fileIndex
-            },
-            overviewState.exportBtn
-          );
-
-          if (res.success) {
-            exportedCount++;
-            fileIndex++;
-          } else {
-            skippedCount++;
-          }
-
-          await returnToViewState(overviewState);
-          await sleep(350);
-        } else {
-          skippedCount++;
-        }
-      }
-
       hideProgressPanel();
       if (!cancelBatchRequested) {
         showToast(
@@ -2516,12 +2341,11 @@
       return res;
     }
 
-    // On Crawl Stats, execute section-by-section:
+    // On Crawl Stats, execute section-by-section across the 4 crawl requests breakdowns:
     // Expand "By response" to 25 rows -> download all data from "By response"
     // -> Expand "By file type" to 25 rows -> download all data from "By file type"
     // -> Expand "By purpose" to 25 rows -> download all data from "By purpose"
     // -> Expand "By Googlebot type" to 25 rows -> download all data from "By Googlebot type"
-    // -> Download remaining sections (Host status, Hosts, etc.)
     if (reportInfo.reportType === 'crawl-stats' && !reportInfo.isDrilldown) {
       return await runCrawlStatsSectionBySectionExport(format, selectedTaskIds, allTasks);
     }
@@ -3130,7 +2954,7 @@
       const action = request.action;
 
       if (action === 'PING') {
-        const ver = (isExtensionValid() && chrome.runtime?.getManifest) ? chrome.runtime.getManifest().version : '3.1.7';
+        const ver = (isExtensionValid() && chrome.runtime?.getManifest) ? chrome.runtime.getManifest().version : '3.1.8';
         sendResponse({ pong: true, version: ver });
         return true;
       }
