@@ -1,5 +1,5 @@
 /**
- * GSC non-API Data Downloader - Content Script (v3.1.6)
+ * GSC non-API Data Downloader - Content Script (v3.1.7)
  * Automates Google Search Console's native Export menu ("Download Excel" / "Download CSV")
  * across the main report AND all sub-reports/drilldowns for:
  * 1. Page Indexing (Indexed pages + all "Why pages aren't indexed" reason drilldowns)
@@ -12,8 +12,8 @@
 (function () {
   'use strict';
 
-  if (window.__GSC_DOWNLOADER_V316_INITIALIZED__) return;
-  window.__GSC_DOWNLOADER_V316_INITIALIZED__ = true;
+  if (window.__GSC_DOWNLOADER_V317_INITIALIZED__) return;
+  window.__GSC_DOWNLOADER_V317_INITIALIZED__ = true;
 
   let isBatchRunning = false;
   let cancelBatchRequested = false;
@@ -767,6 +767,22 @@
       cardRoot = parent;
     }
 
+    const hasTableOrRows = (el) => !!el.querySelector('tbody, [role="row"], table');
+    if (!hasTableOrRows(cardRoot)) {
+      const scopes = [cardRoot];
+      let sib = cardRoot.nextElementSibling;
+      while (sib) {
+        if (otherHeadingEls.some((otherEl) => sib === otherEl || sib.contains(otherEl))) {
+          break;
+        }
+        if (isElementVisible(sib)) {
+          scopes.push(sib);
+        }
+        sib = sib.nextElementSibling;
+      }
+      if (scopes.length > 1) return scopes;
+    }
+
     if (cardRoot === item.headingEl || cardRoot.children.length === 0) {
       const scopes = [];
       let sib = item.headingEl.nextElementSibling;
@@ -1130,17 +1146,20 @@
 
   /**
    * Checks whether a pagination dropdown trigger is already set to 25 rows per page.
-   * Inspects the trigger element directly to prevent false positives from table cell data.
+   * Inspects the trigger element and its host container to prevent false positives from table cell data.
    */
-  function isTriggerAlready25(trigger) {
-    if (!trigger) return false;
-    const txt = getCleanElementText(trigger).trim();
-    if (txt === '25' || /^25\b/.test(txt)) return true;
-    const aria = trigger.getAttribute('aria-label') || '';
-    if (/\b25\b/.test(aria)) return true;
-    const valText = trigger.querySelector('.mat-mdc-select-value, .mat-select-value, .mat-mdc-select-value-text');
-    if (valText && (getCleanElementText(valText).trim() === '25' || /^25\b/.test(getCleanElementText(valText).trim()))) {
-      return true;
+  function isTriggerAlready25(trigger, container) {
+    const targets = [trigger, container].filter(Boolean);
+    for (const el of targets) {
+      const txt = getCleanElementText(el).trim();
+      if (txt === '25' || /^25\b/.test(txt)) return true;
+      const aria = el.getAttribute('aria-label') || '';
+      if (/\b25\b/.test(aria)) return true;
+      const valText = el.querySelector('.mat-mdc-select-value, .mat-select-value, .mat-mdc-select-value-text');
+      if (valText) {
+        const vt = getCleanElementText(valText).trim();
+        if (vt === '25' || /^25\b/.test(vt)) return true;
+      }
     }
     return false;
   }
@@ -1296,28 +1315,92 @@
   }
 
   /**
-   * Expands a single Crawl Stats breakdown card to 25 rows per page.
-   * Handles overlay lifecycle cleanly to prevent backdrop interference across cards.
+   * Uniquely and reliably locates the pagination block for a specific Crawl Stats breakdown card.
+   * Strategy 1: Check if an ancestor card container of the heading contains a paginator.
+   * Strategy 2: Preceding heading relationship (finds the paginator that directly follows this heading in document order).
+   * Strategy 3: Positional index mapping fallback across all document paginators.
    */
-  async function expandCardTo25(cardScope, sectionName = '') {
-    if (!cardScope || !isElementVisible(cardScope)) return false;
+  function findPaginatorForSection(sectionId, sectionName) {
+    const allPaginators = findAllPaginationBlocks();
+    if (allPaginators.length === 0) return null;
 
-    // 1. Wait for any previous overlay or backdrop to completely vanish
-    await waitForOverlaysToClose(1200);
+    const headings = findCrawlStatsBreakdownHeadings();
+    const currentHeading = headings.find(
+      (h) => h.id === sectionId || h.section.toLowerCase() === sectionName.toLowerCase()
+    );
 
-    // 2. Scroll the card into the center of the viewport
-    cardScope.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
-    await sleep(150);
+    if (currentHeading && currentHeading.headingEl) {
+      const headingEl = currentHeading.headingEl;
+      const otherHeadingEls = headings
+        .filter((h) => h.headingEl !== headingEl)
+        .map((h) => h.headingEl);
 
-    // 3. Find paginator footer inside cardScope
-    const paginator = findPaginatorInCardScope(cardScope) || cardScope;
-    const triggerInfo = findDropdownTriggerInPaginationBlock(paginator);
+      // Strategy 1: Ancestor walk up while not enclosing other breakdown headings
+      let curr = headingEl.parentElement;
+      while (curr && curr !== document.body) {
+        if (otherHeadingEls.some((other) => curr.contains(other))) {
+          break;
+        }
+        const p = curr.querySelector('mat-paginator, .mat-mdc-paginator, .mat-paginator');
+        if (p && isElementVisible(p)) {
+          return p;
+        }
+        curr = curr.parentElement;
+      }
+
+      // Strategy 2: Preceding heading relationship via compareDocumentPosition
+      for (const paginator of allPaginators) {
+        let closestPrecedingHeading = null;
+        for (const h of headings) {
+          if (!h.headingEl) continue;
+          const pos = h.headingEl.compareDocumentPosition(paginator);
+          if (pos & Node.DOCUMENT_POSITION_FOLLOWING) {
+            if (!closestPrecedingHeading) {
+              closestPrecedingHeading = h;
+            } else {
+              const rel = closestPrecedingHeading.headingEl.compareDocumentPosition(h.headingEl);
+              if (rel & Node.DOCUMENT_POSITION_FOLLOWING) {
+                closestPrecedingHeading = h;
+              }
+            }
+          }
+        }
+
+        if (
+          closestPrecedingHeading &&
+          (closestPrecedingHeading.id === sectionId ||
+           closestPrecedingHeading.section.toLowerCase() === sectionName.toLowerCase())
+        ) {
+          return paginator;
+        }
+      }
+    }
+
+    // Strategy 3: Positional index mapping fallback
+    const positionalOrder = ['by-response', 'by-file-type', 'by-googlebot'];
+    const posIdx = positionalOrder.indexOf(sectionId);
+    if (posIdx !== -1 && posIdx < allPaginators.length) {
+      return allPaginators[posIdx];
+    }
+
+    return null;
+  }
+
+  /**
+   * Expands a single pagination block to 25 rows per page.
+   * Handles native select and Angular Material MatSelect dropdowns with full
+   * pointer, mouse, and keyboard Space/Enter interactions and clean overlay lifecycle.
+   */
+  async function expandPaginatorBlockTo25(block, sectionName = '') {
+    if (!block || !isElementVisible(block)) return false;
+
+    const triggerInfo = findDropdownTriggerInPaginationBlock(block);
     if (!triggerInfo) {
-      console.log(`GSC non-API Downloader: No pagination trigger found in card "${sectionName}"`);
+      console.log(`GSC non-API Downloader: No dropdown trigger found in paginator${sectionName ? ` for "${sectionName}"` : ''}.`);
       return false;
     }
 
-    // 4. Handle native select
+    // 1. Native <select> element
     if (triggerInfo.type === 'select') {
       const selectEl = triggerInfo.element;
       const opt = Array.from(selectEl.options).find(
@@ -1329,22 +1412,30 @@
         await sleep(650);
         return true;
       }
-      return false;
-    }
-
-    const trigger = triggerInfo.element;
-
-    // 5. Check if already showing 25
-    if (isTriggerAlready25(trigger)) {
-      console.log(`GSC non-API Downloader: "${sectionName}" pagination is already set to 25 rows`);
       return true;
     }
 
-    // 6. Scroll trigger specifically into view to ensure it's not obscured
-    trigger.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
-    await sleep(100);
+    const { element: trigger, container } = triggerInfo;
 
-    // 7. Click trigger to open dropdown
+    // 2. Already showing 25 rows?
+    if (isTriggerAlready25(trigger, container)) {
+      console.log(`GSC non-API Downloader: Pagination${sectionName ? ` for "${sectionName}"` : ''} is already set to 25 rows.`);
+      return true;
+    }
+
+    // 3. Clear any stale overlays before opening
+    await waitForOverlaysToClose(800);
+
+    // 4. Scroll paginator and trigger into view
+    block.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
+    await sleep(150);
+
+    const host = container || trigger;
+    if (typeof host.focus === 'function') {
+      try { host.focus({ preventScroll: true }); } catch (e) {}
+    }
+
+    // 5. Open dropdown by dispatching pointer and mouse events
     const rect = trigger.getBoundingClientRect();
     const x = rect.left + rect.width / 2;
     const y = rect.top + rect.height / 2;
@@ -1370,22 +1461,34 @@
     trigger.dispatchEvent(new MouseEvent('click', { ...clickOpts, buttons: 0 }));
     try { trigger.click(); } catch (e) {}
 
-    // 8. Poll for the opened dropdown overlay panel (up to 2000ms)
-    let activePanel = null;
-    let opt25 = null;
+    if (host !== trigger) {
+      try { host.click(); } catch (e) {}
+    }
 
+    // 6. Keyboard fallback: Angular Material MatSelect opens on Space or Enter
     const panelSelectors = [
-      'div.cdk-overlay-pane:not([style*="display: none"])',
+      'div.cdk-overlay-pane:not([style*="display: none"]) [role="listbox"]',
       'div.cdk-overlay-container [role="listbox"]',
       'div.mat-mdc-select-panel',
       'div.mat-select-panel',
       '[role="listbox"]',
-      '[role="menu"]',
-      '.VfPpkd-xl07Ob-XxIAqe',
-      '.goog-menu'
+      'div.cdk-overlay-pane:not([style*="display: none"])'
     ];
 
-    for (let attempt = 0; attempt < 20; attempt++) {
+    await sleep(250);
+    const existingPanel = document.querySelector(panelSelectors.join(','));
+    if (!existingPanel) {
+      const spaceDown = new KeyboardEvent('keydown', { key: ' ', code: 'Space', keyCode: 32, which: 32, bubbles: true, cancelable: true, composed: true });
+      host.dispatchEvent(spaceDown);
+      const spaceUp = new KeyboardEvent('keyup', { key: ' ', code: 'Space', keyCode: 32, which: 32, bubbles: true, cancelable: true, composed: true });
+      host.dispatchEvent(spaceUp);
+    }
+
+    // 7. Poll for dropdown overlay and locate option "25"
+    let activePanel = null;
+    let opt25 = null;
+
+    for (let attempt = 0; attempt < 22; attempt++) {
       await sleep(100);
 
       const visiblePanels = Array.from(document.querySelectorAll(panelSelectors.join(',')))
@@ -1423,11 +1526,11 @@
     }
 
     if (!opt25) {
-      const documentOptions = Array.from(
+      const docOptions = Array.from(
         document.querySelectorAll('mat-option, .mat-mdc-option, [role="option"][data-value="25"], [role="option"]')
       ).filter((el) => isMenuElementVisible(el) && !el.closest('#gsc-downloader-floating-root'));
 
-      opt25 = documentOptions.find((el) => {
+      opt25 = docOptions.find((el) => {
         const val = el.getAttribute('data-value') || el.getAttribute('value') || '';
         if (val === '25') return true;
         const txt = getCleanElementText(el).trim();
@@ -1435,6 +1538,7 @@
       });
     }
 
+    // 8. Select option "25"
     if (opt25) {
       if (typeof opt25.focus === 'function') {
         try { opt25.focus({ preventScroll: true }); } catch (e) {}
@@ -1453,246 +1557,85 @@
         clientY: optY,
         screenX: optX,
         screenY: optY,
-        button: 0
+        button: 0,
+        buttons: 1
       };
 
       opt25.dispatchEvent(new PointerEvent('pointerenter', { ...optOpts, buttons: 0 }));
       opt25.dispatchEvent(new MouseEvent('mouseenter', { ...optOpts, buttons: 0 }));
-      opt25.dispatchEvent(new PointerEvent('pointerover', { ...optOpts, buttons: 0 }));
-      opt25.dispatchEvent(new MouseEvent('mouseover', { ...optOpts, buttons: 0 }));
-      await sleep(30);
-
-      opt25.dispatchEvent(new PointerEvent('pointerdown', { ...optOpts, buttons: 1 }));
-      opt25.dispatchEvent(new MouseEvent('mousedown', { ...optOpts, buttons: 1 }));
+      opt25.dispatchEvent(new PointerEvent('pointerdown', optOpts));
+      opt25.dispatchEvent(new MouseEvent('mousedown', optOpts));
       await sleep(40);
-
       opt25.dispatchEvent(new PointerEvent('pointerup', { ...optOpts, buttons: 0 }));
       opt25.dispatchEvent(new MouseEvent('mouseup', { ...optOpts, buttons: 0 }));
       opt25.dispatchEvent(new MouseEvent('click', { ...optOpts, buttons: 0 }));
-
       try { opt25.click(); } catch (e) {}
 
-      const innerTextSpan = opt25.querySelector('.mdc-list-item__primary-text, .mat-mdc-option-text, .mat-option-text, span');
-      if (innerTextSpan && innerTextSpan !== opt25) {
+      const innerSpan = opt25.querySelector('.mdc-list-item__primary-text, .mat-mdc-option-text, .mat-option-text, span');
+      if (innerSpan && innerSpan !== opt25) {
         try {
-          innerTextSpan.dispatchEvent(new MouseEvent('click', { ...optOpts, buttons: 0 }));
-          innerTextSpan.click();
+          innerSpan.dispatchEvent(new MouseEvent('click', { ...optOpts, buttons: 0 }));
+          innerSpan.click();
         } catch (e) {}
       }
 
-      const enterOpts = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
-      opt25.dispatchEvent(new KeyboardEvent('keydown', enterOpts));
-      opt25.dispatchEvent(new KeyboardEvent('keypress', enterOpts));
-      opt25.dispatchEvent(new KeyboardEvent('keyup', enterOpts));
+      const enterKey = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true, composed: true };
+      opt25.dispatchEvent(new KeyboardEvent('keydown', enterKey));
+      opt25.dispatchEvent(new KeyboardEvent('keypress', enterKey));
+      opt25.dispatchEvent(new KeyboardEvent('keyup', enterKey));
 
-      const spaceOpts = { key: ' ', code: 'Space', keyCode: 32, which: 32, bubbles: true, cancelable: true };
-      opt25.dispatchEvent(new KeyboardEvent('keydown', spaceOpts));
-      opt25.dispatchEvent(new KeyboardEvent('keyup', spaceOpts));
+      const spaceKey = { key: ' ', code: 'Space', keyCode: 32, which: 32, bubbles: true, cancelable: true, composed: true };
+      opt25.dispatchEvent(new KeyboardEvent('keydown', spaceKey));
+      opt25.dispatchEvent(new KeyboardEvent('keyup', spaceKey));
 
       await sleep(500);
-
       await waitForOverlaysToClose(1200);
+      console.log(`GSC non-API Downloader: Successfully expanded pagination to 25 rows${sectionName ? ` for "${sectionName}"` : ''}.`);
       return true;
     } else {
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
       await sleep(150);
       await waitForOverlaysToClose(800);
+      console.log(`GSC non-API Downloader: Option 25 not found in dropdown${sectionName ? ` for "${sectionName}"` : ''}.`);
+      return false;
+    }
+  }
+
+  /**
+   * Expands a single specific breakdown card on Crawl Stats to 25 rows per page.
+   * Matches heading using targetId and targetSectionName.
+   */
+  async function expandBreakdownSectionTo25(targetId, targetSectionName) {
+    if (targetId === 'by-purpose' || (targetSectionName && targetSectionName.toLowerCase().includes('purpose'))) {
+      console.log(`GSC non-API Downloader: "${targetSectionName}" only has at most 2 rows; no expansion needed.`);
+      return true;
     }
 
-    return false;
+    const paginator = findPaginatorForSection(targetId, targetSectionName);
+    if (!paginator) {
+      console.log(`GSC non-API Downloader: No paginator found for "${targetSectionName}" (may already display all rows).`);
+      return true;
+    }
+
+    return await expandPaginatorBlockTo25(paginator, targetSectionName);
+  }
+
+  /**
+   * Expands a single Crawl Stats breakdown card to 25 rows per page.
+   * Handles overlay lifecycle cleanly to prevent backdrop interference across cards.
+   */
+  async function expandCardTo25(cardScope, sectionName = '') {
+    if (!cardScope || !isElementVisible(cardScope)) return false;
+
+    const paginator = findPaginatorInCardScope(cardScope) || cardScope;
+    return await expandPaginatorBlockTo25(paginator, sectionName);
   }
 
   /**
    * Expands a single pagination block to 25 rows per page.
-   * Accurately scopes searching to the opened dropdown overlay panel and dispatches
-   * pointer, mouse, and keyboard interaction to reliably select the "25" option.
    */
   async function expandPaginationBlockTo25(block) {
-    const triggerInfo = findDropdownTriggerInPaginationBlock(block);
-    if (!triggerInfo) return false;
-
-    // A. Native <select> element
-    if (triggerInfo.type === 'select') {
-      const selectEl = triggerInfo.element;
-      const opt = Array.from(selectEl.options).find(
-        (o) => o.value === '25' || o.text.trim() === '25' || /^25\b/.test(o.text.trim())
-      );
-      if (opt && selectEl.value !== opt.value) {
-        selectEl.value = opt.value;
-        selectEl.dispatchEvent(new Event('change', { bubbles: true }));
-        await sleep(650);
-        return true;
-      }
-      return false;
-    }
-
-    const trigger = triggerInfo.element;
-
-    // Check if trigger itself already displays "25"
-    if (isTriggerAlready25(trigger)) {
-      return true;
-    }
-
-    await waitForOverlaysToClose(800);
-
-    trigger.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
-    await sleep(100);
-
-    const rect = trigger.getBoundingClientRect();
-    const x = rect.left + rect.width / 2;
-    const y = rect.top + rect.height / 2;
-
-    const clickOpts = {
-      bubbles: true,
-      cancelable: true,
-      composed: true,
-      view: window,
-      clientX: x,
-      clientY: y,
-      screenX: x,
-      screenY: y,
-      button: 0,
-      buttons: 1
-    };
-
-    trigger.dispatchEvent(new PointerEvent('pointerdown', clickOpts));
-    trigger.dispatchEvent(new MouseEvent('mousedown', clickOpts));
-    await sleep(35);
-    trigger.dispatchEvent(new PointerEvent('pointerup', { ...clickOpts, buttons: 0 }));
-    trigger.dispatchEvent(new MouseEvent('mouseup', { ...clickOpts, buttons: 0 }));
-    trigger.dispatchEvent(new MouseEvent('click', { ...clickOpts, buttons: 0 }));
-    try { trigger.click(); } catch (e) {}
-
-    let activePanel = null;
-    let opt25 = null;
-
-    const panelSelectors = [
-      'div.cdk-overlay-pane:not([style*="display: none"])',
-      'div.cdk-overlay-container [role="listbox"]',
-      'div.mat-mdc-select-panel',
-      'div.mat-select-panel',
-      '[role="listbox"]',
-      '[role="menu"]',
-      '.VfPpkd-xl07Ob-XxIAqe',
-      '.goog-menu'
-    ];
-
-    for (let attempt = 0; attempt < 20; attempt++) {
-      await sleep(100);
-
-      const visiblePanels = Array.from(document.querySelectorAll(panelSelectors.join(',')))
-        .filter((p) => isMenuElementVisible(p) && !p.closest('#gsc-downloader-floating-root'));
-
-      if (visiblePanels.length > 0) {
-        activePanel = visiblePanels[visiblePanels.length - 1];
-
-        const optionEls = Array.from(activePanel.querySelectorAll('mat-option, [role="option"], .mat-mdc-option, .mat-option, [role="menuitem"], .VfPpkd-Listitem, li'))
-          .filter((el) => isMenuElementVisible(el));
-
-        opt25 = optionEls.find((el) => {
-          const val = el.getAttribute('data-value') || el.getAttribute('value') || el.value || '';
-          if (val === '25') return true;
-          const txt = getCleanElementText(el).trim();
-          return txt === '25' || /^25\b/.test(txt);
-        });
-
-        if (!opt25) {
-          const allInPanel = Array.from(activePanel.querySelectorAll('*'))
-            .filter((el) => isMenuElementVisible(el));
-
-          const match = allInPanel.find((el) => {
-            const val = el.getAttribute('data-value') || '';
-            if (val === '25') return true;
-            const t = (el.textContent || '').trim();
-            return t === '25';
-          });
-
-          if (match) {
-            opt25 = match.closest('mat-option, [role="option"], .mat-mdc-option, li') || match;
-          }
-        }
-
-        if (opt25) break;
-      }
-    }
-
-    if (!opt25) {
-      const documentOptions = Array.from(document.querySelectorAll('mat-option, .mat-mdc-option, [role="option"][data-value="25"], [role="option"]'))
-        .filter((el) => isMenuElementVisible(el) && !el.closest('#gsc-downloader-floating-root'));
-
-      opt25 = documentOptions.find((el) => {
-        const val = el.getAttribute('data-value') || el.getAttribute('value') || '';
-        if (val === '25') return true;
-        const txt = getCleanElementText(el).trim();
-        return txt === '25' || /^25\b/.test(txt);
-      });
-    }
-
-    if (opt25) {
-      if (typeof opt25.focus === 'function') {
-        try { opt25.focus({ preventScroll: true }); } catch (e) {}
-      }
-
-      const optRect = opt25.getBoundingClientRect();
-      const optX = optRect.left + optRect.width / 2;
-      const optY = optRect.top + optRect.height / 2;
-
-      const optOpts = {
-        bubbles: true,
-        cancelable: true,
-        composed: true,
-        view: window,
-        clientX: optX,
-        clientY: optY,
-        screenX: optX,
-        screenY: optY,
-        button: 0
-      };
-
-      opt25.dispatchEvent(new PointerEvent('pointerenter', { ...optOpts, buttons: 0 }));
-      opt25.dispatchEvent(new MouseEvent('mouseenter', { ...optOpts, buttons: 0 }));
-      opt25.dispatchEvent(new PointerEvent('pointerover', { ...optOpts, buttons: 0 }));
-      opt25.dispatchEvent(new MouseEvent('mouseover', { ...optOpts, buttons: 0 }));
-      await sleep(30);
-
-      opt25.dispatchEvent(new PointerEvent('pointerdown', { ...optOpts, buttons: 1 }));
-      opt25.dispatchEvent(new MouseEvent('mousedown', { ...optOpts, buttons: 1 }));
-      await sleep(40);
-
-      opt25.dispatchEvent(new PointerEvent('pointerup', { ...optOpts, buttons: 0 }));
-      opt25.dispatchEvent(new MouseEvent('mouseup', { ...optOpts, buttons: 0 }));
-      opt25.dispatchEvent(new MouseEvent('click', { ...optOpts, buttons: 0 }));
-
-      try { opt25.click(); } catch (e) {}
-
-      const innerTextSpan = opt25.querySelector('.mdc-list-item__primary-text, .mat-mdc-option-text, .mat-option-text, span');
-      if (innerTextSpan && innerTextSpan !== opt25) {
-        try {
-          innerTextSpan.dispatchEvent(new MouseEvent('click', { ...optOpts, buttons: 0 }));
-          innerTextSpan.click();
-        } catch (e) {}
-      }
-
-      const enterOpts = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
-      opt25.dispatchEvent(new KeyboardEvent('keydown', enterOpts));
-      opt25.dispatchEvent(new KeyboardEvent('keypress', enterOpts));
-      opt25.dispatchEvent(new KeyboardEvent('keyup', enterOpts));
-
-      const spaceOpts = { key: ' ', code: 'Space', keyCode: 32, which: 32, bubbles: true, cancelable: true };
-      opt25.dispatchEvent(new KeyboardEvent('keydown', spaceOpts));
-      opt25.dispatchEvent(new KeyboardEvent('keyup', spaceOpts));
-
-      await sleep(500);
-
-      await waitForOverlaysToClose(1000);
-      return true;
-    } else {
-      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
-      await sleep(150);
-      await waitForOverlaysToClose(800);
-    }
-
-    return false;
+    return await expandPaginatorBlockTo25(block);
   }
 
   /**
@@ -1707,28 +1650,24 @@
    */
   async function expandAllCrawlStatsBreakdownsTo25() {
     let anyChanged = false;
+    const breakdownSections = [
+      { id: 'by-response', name: 'By response' },
+      { id: 'by-file-type', name: 'By file type' },
+      { id: 'by-purpose', name: 'By purpose' },
+      { id: 'by-googlebot', name: 'By Googlebot type' }
+    ];
 
-    // 1. Explicitly locate the 4 Crawl Requests Breakdown headings
-    const breakdownHeadings = findCrawlStatsBreakdownHeadings();
-    const targetBreakdownIds = ['by-response', 'by-file-type', 'by-purpose', 'by-googlebot'];
-    const targetHeadings = breakdownHeadings.filter((h) => targetBreakdownIds.includes(h.id));
-
-    if (targetHeadings.length > 0) {
-      for (const item of targetHeadings) {
-        try {
-          showProgressPanel(1, 1, `Expanding "${item.section}" to 25 rows...`);
-          const scopes = getBreakdownCardScopeElements(item, breakdownHeadings);
-          for (const scope of scopes) {
-            const changed = await expandCardTo25(scope, item.section);
-            if (changed) anyChanged = true;
-          }
-        } catch (e) {
-          console.warn(`GSC non-API Downloader: Error expanding breakdown "${item.section}" to 25`, e);
-        }
+    for (const section of breakdownSections) {
+      try {
+        showProgressPanel(1, 1, `Expanding "${section.name}" to 25 rows...`);
+        const changed = await expandBreakdownSectionTo25(section.id, section.name);
+        if (changed) anyChanged = true;
+      } catch (e) {
+        console.warn(`GSC non-API Downloader: Error expanding breakdown "${section.name}" to 25`, e);
       }
     }
 
-    // 2. Fallback: check any remaining unexpanded pagination blocks on the page
+    // Fallback: check any remaining unexpanded pagination blocks on the page
     const blocks = findAllPaginationBlocks();
     for (const block of blocks) {
       try {
@@ -1741,38 +1680,6 @@
 
     if (anyChanged) {
       await sleep(600);
-    }
-    return anyChanged;
-  }
-
-  /**
-   * Expands a single specific breakdown card on Crawl Stats to 25 rows per page.
-   * Matches heading using targetId and targetSectionName.
-   */
-  async function expandBreakdownSectionTo25(targetId, targetSectionName) {
-    const headings = findCrawlStatsBreakdownHeadings();
-    const item = headings.find(
-      (h) => h.id === targetId || h.section.toLowerCase() === targetSectionName.toLowerCase()
-    );
-
-    if (!item) {
-      console.log(`GSC non-API Downloader: Heading for "${targetSectionName}" not found on page.`);
-      return false;
-    }
-
-    const scopes = getBreakdownCardScopeElements(item, headings);
-    let anyChanged = false;
-    for (const scope of scopes) {
-      try {
-        const changed = await expandCardTo25(scope, item.section);
-        if (changed) anyChanged = true;
-      } catch (e) {
-        console.warn(`GSC non-API Downloader: Error expanding card for "${item.section}"`, e);
-      }
-    }
-
-    if (anyChanged) {
-      await sleep(400);
     }
     return anyChanged;
   }
@@ -2254,16 +2161,57 @@
     return waitForViewChange(prevState, 7000);
   }
 
+  /**
+   * Smoothly scrolls the window straight down to the "Crawl requests breakdown" section.
+   * Matches the main breakdown header across all GSC supported languages,
+   * with a fallback to the first breakdown card heading ("By response").
+   */
+  async function jumpToCrawlRequestsBreakdown() {
+    try {
+      // 1. Look for the main Crawl Requests Breakdown section header
+      const candidates = Array.from(
+        document.querySelectorAll('h1, h2, h3, h4, [role="heading"], div, span, p')
+      ).filter((el) => isElementVisible(el) && !el.closest('#gsc-downloader-floating-root'));
+
+      const breakdownRegex = /(?:crawl requests:?\s*(?:breakdown)?|desglose(?:\s+de\s+las\s+solicitudes\s+de\s+rastreo)?|breakdown)/i;
+      const mainHeader = candidates.find((el) => {
+        const txt = getCleanElementText(el);
+        return txt.length < 60 && breakdownRegex.test(txt);
+      });
+
+      let targetEl = mainHeader;
+
+      // 2. Fallback: Scroll to the first breakdown card heading ("By response")
+      if (!targetEl) {
+        const headings = findCrawlStatsBreakdownHeadings();
+        const firstHeading = headings.find((h) => h.id === 'by-response') || headings[0];
+        if (firstHeading && firstHeading.headingEl) {
+          targetEl = firstHeading.headingEl;
+        }
+      }
+
+      if (targetEl) {
+        targetEl.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        await sleep(650);
+        return true;
+      }
+    } catch (e) {
+      console.warn('GSC non-API Downloader: Could not scroll to breakdown section', e);
+    }
+    return false;
+  }
+
   // --- BATCH AUTOMATION RUNNER ---
 
   /**
    * Executes a section-by-section Crawl Stats batch export:
    * 1. Exports Main Overview 90-day charts (if included).
-   * 2. Expands "By response" to 25 rows -> downloads all data from "By response".
-   * 3. Expands "By file type" to 25 rows -> downloads all data from "By file type".
-   * 4. Expands "By purpose" to 25 rows -> downloads all data from "By purpose".
-   * 5. Expands "By Googlebot type" to 25 rows -> downloads all data from "By Googlebot type".
-   * 6. Downloads all remaining sections (Host status, Hosts, etc.).
+   * 2. Scrolls/jumps straight down to the "Crawl requests breakdown" section.
+   * 3. Expands "By response" to 25 rows -> downloads all data from "By response".
+   * 4. Expands "By file type" to 25 rows -> downloads all data from "By file type".
+   * 5. Expands "By purpose" to 25 rows -> downloads all data from "By purpose".
+   * 6. Expands "By Googlebot type" to 25 rows -> downloads all data from "By Googlebot type".
+   * 7. Downloads all remaining sections (Host status, Hosts, etc.).
    */
   async function runCrawlStatsSectionBySectionExport(format, selectedTaskIds, allTasks) {
     isBatchRunning = true;
@@ -2291,6 +2239,12 @@
         } else {
           skippedCount++;
         }
+        await sleep(400);
+      }
+
+      // Jump straight to the Crawl requests breakdown section
+      if (!cancelBatchRequested) {
+        await jumpToCrawlRequestsBreakdown();
         await sleep(400);
       }
 
@@ -3176,7 +3130,7 @@
       const action = request.action;
 
       if (action === 'PING') {
-        const ver = (isExtensionValid() && chrome.runtime?.getManifest) ? chrome.runtime.getManifest().version : '3.1.6';
+        const ver = (isExtensionValid() && chrome.runtime?.getManifest) ? chrome.runtime.getManifest().version : '3.1.7';
         sendResponse({ pong: true, version: ver });
         return true;
       }
