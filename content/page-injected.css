@@ -1,4 +1,4 @@
-/* Styles for GSC non-API Data Downloader In-Page UI (v2.0.0) */
+/* Styles for GSC non-API Data Downloader In-Page UI (v3.1.4) */
 
 .gsc-downloader-floating-btn {
   position: fixed;
@@ -7,8 +7,8 @@
   z-index: 999998;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 10px 18px;
+  gap: 7px;
+  padding: 10px 16px 10px 10px;
   background: linear-gradient(135deg, #1a73e8 0%, #1557b0 100%);
   color: #ffffff;
   font-family: 'Google Sans', Roboto, -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
@@ -16,27 +16,53 @@
   font-weight: 500;
   border: none;
   border-radius: 28px;
-  cursor: pointer;
+  cursor: grab;
   box-shadow: 0 4px 14px rgba(26, 115, 232, 0.4), 0 1px 3px rgba(0, 0, 0, 0.12);
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: box-shadow 0.2s ease, background 0.2s ease;
   user-select: none;
+  touch-action: none;
 }
 
 .gsc-downloader-floating-btn:hover {
   background: linear-gradient(135deg, #1967d2 0%, #0d47a1 100%);
   box-shadow: 0 6px 20px rgba(26, 115, 232, 0.5), 0 2px 5px rgba(0, 0, 0, 0.18);
-  transform: translateY(-2px);
 }
 
-.gsc-downloader-floating-btn:active {
-  transform: translateY(0);
-  box-shadow: 0 2px 8px rgba(26, 115, 232, 0.4);
+.gsc-downloader-floating-btn.is-dragging {
+  cursor: grabbing !important;
+  box-shadow: 0 12px 30px rgba(26, 115, 232, 0.65), 0 4px 12px rgba(0, 0, 0, 0.3) !important;
+  transform: scale(1.03);
+  transition: none !important;
 }
 
-.gsc-downloader-floating-btn svg {
-  width: 18px;
-  height: 18px;
+.gsc-drag-grip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 14px;
+  line-height: 1;
+  letter-spacing: -2px;
+  cursor: grab;
+  padding: 0 2px;
+  user-select: none;
+}
+
+.gsc-downloader-floating-btn.is-dragging .gsc-drag-grip {
+  cursor: grabbing !important;
+  color: #ffffff;
+}
+
+.gsc-floating-btn-icon {
+  width: 17px;
+  height: 17px;
   fill: currentColor;
+  flex-shrink: 0;
+}
+
+.gsc-floating-btn-text {
+  font-weight: 500;
+  white-space: nowrap;
 }
 
 /* Live Batch Progress Panel */

@@ -1,5 +1,5 @@
 /**
- * GSC non-API Data Downloader - Popup Controller (v3.1.3)
+ * GSC non-API Data Downloader - Popup Controller (v3.1.4)
  * Controls native report & drilldown export selection, format preferences,
  * and macOS silent download configuration.
  */
@@ -115,11 +115,21 @@ document.addEventListener('DOMContentLoaded', async () => {
   fmtExcel.addEventListener('click', () => {
     setFormatUI('excel');
     chrome.storage.local.set({ exportFormat: 'excel' });
+    if (activeTab && activeTab.id) {
+      chrome.tabs.sendMessage(activeTab.id, { action: 'SET_EXPORT_FORMAT', format: 'excel' }, () => {
+        if (chrome.runtime?.lastError) {}
+      });
+    }
   });
 
   fmtCsv.addEventListener('click', () => {
     setFormatUI('csv');
     chrome.storage.local.set({ exportFormat: 'csv' });
+    if (activeTab && activeTab.id) {
+      chrome.tabs.sendMessage(activeTab.id, { action: 'SET_EXPORT_FORMAT', format: 'csv' }, () => {
+        if (chrome.runtime?.lastError) {}
+      });
+    }
   });
 
   if (toggleSubfolder) {

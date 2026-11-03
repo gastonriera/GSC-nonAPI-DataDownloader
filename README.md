@@ -1,4 +1,4 @@
-# GSC non-API Data Downloader (`v3.1.3`)
+# GSC non-API Data Downloader (`v3.1.4`)
 
 A property-agnostic Chrome extension (Manifest V3) that automates **1-click native file exports (`Download Excel` / `Download CSV`)** across Google Search Console reports and all of their sub-reports/drilldowns:
 1. **Page Indexing Report** (`/index` — exports Indexed Pages + cycles through every reason in *"Why pages aren't indexed"*)
@@ -11,15 +11,18 @@ A property-agnostic Chrome extension (Manifest V3) that automates **1-click nati
 
 The official Google Search Console API does not provide endpoints for Crawl Stats, Core Web Vitals aggregates, or full Page Indexing drilldowns. In the GSC web interface, downloading all of these requires manually clicking into dozens of sub-reports and clicking `Export` → `Download Excel` one by one.
 
-**GSC non-API Data Downloader (`v3.1.3`)** automates that entire process with a single click—regardless of which domain, language, or property type is open—downloading the official Google Search Console `.xlsx` (or `.zip` CSV) files and organizing them into a clean folder in your `Downloads` directory without interrupting dialogs.
+**GSC non-API Data Downloader (`v3.1.4`)** automates that entire process with a single click—regardless of which domain, language, or property type is open—downloading the official Google Search Console `.xlsx` (or `.zip` CSV) files and organizing them into a clean folder in your `Downloads` directory without interrupting dialogs.
 
 ---
 
-## 🚀 Key Features (`v3.1.3`)
+## 🚀 Key Features (`v3.1.4`)
 
 * **🌐 100% Property- & Language-Agnostic**:
   * Works on any GSC property (Domain property, URL-prefix property, subfolder, etc.) without inspecting or depending on the domain name.
   * Fully supports multilingual interfaces (English, Spanish, French, German, Italian, Portuguese, etc.), matching localized navigation, headings, and pagination controls.
+* **🎯 Draggable Floating Export Button (`v3.1.4`)**:
+  * **Free-Floating Window Positioning**: Move the in-page export button anywhere on the screen by dragging its grip `⋮⋮` or button body. It stays at your chosen position across single-page report navigation until you refresh the window.
+  * **Dynamic Format Reflection**: Instantly reflects your chosen export format (`Excel` or `CSV`) directly on the button label, updating in real time whenever you switch formats in the popup.
 * **⚡ Silent Downloads & macOS Save Dialog Prevention**:
   * **Automatic Multi-File Downloads**: Grants `contentSettings.automaticDownloads` permission to `https://search.google.com/*`, permanently preventing Chrome from prompting *"This site is attempting to download multiple files. Allow / Block"*.
   * **Zero Collision Prompts**: Enforces `conflictAction: 'uniquify'` on all Google Search Console exports so Chrome never prompts to overwrite or pick duplicate filenames.
@@ -71,6 +74,6 @@ To ensure batch exports run completely in the background on macOS without Chrome
 
 This project follows a strict three-tier versioning system (`MAJOR.MINOR.PATCH`):
 
-* **Patch / 3rd digit (e.g., `3.1.2` → `3.1.3`):** Applied for **cosmetic changes, timing, and platform/browser behavior adjustments** — fine-tuning behavior, adjusting trigger moments, rows-per-page selection, download dialog suppression, typography/color tweaks, or setting/menu arrangement changes.
+* **Patch / 3rd digit (e.g., `3.1.3` → `3.1.4`):** Applied for **cosmetic changes, timing, and platform/browser behavior adjustments** — fine-tuning behavior, adjusting trigger moments, draggable floating button, format synchronization, rows-per-page selection, download dialog suppression, typography/color tweaks, or setting/menu arrangement changes.
 * **Medium / 2nd digit (e.g., `3.0.0` → `3.1.0`):** Applied for **medium changes** — introducing new capabilities, new filters, new export formats, or feature additions without rewriting core architecture.
 * **Major / 1st digit (e.g., `2.2.0` → `3.0.0`):** Applied for **major changes** — fundamental code rework, major architectural refactoring, or introducing entirely new core feature suites.

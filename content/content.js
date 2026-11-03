@@ -1,5 +1,5 @@
 /**
- * GSC non-API Data Downloader - Content Script (v3.1.3)
+ * GSC non-API Data Downloader - Content Script (v3.1.4)
  * Automates Google Search Console's native Export menu ("Download Excel" / "Download CSV")
  * across the main report AND all sub-reports/drilldowns for:
  * 1. Page Indexing (Indexed pages + all "Why pages aren't indexed" reason drilldowns)
@@ -12,12 +12,14 @@
 (function () {
   'use strict';
 
-  if (window.__GSC_DOWNLOADER_V313_INITIALIZED__) return;
-  window.__GSC_DOWNLOADER_V313_INITIALIZED__ = true;
+  if (window.__GSC_DOWNLOADER_V314_INITIALIZED__) return;
+  window.__GSC_DOWNLOADER_V314_INITIALIZED__ = true;
 
   let isBatchRunning = false;
   let cancelBatchRequested = false;
   let batchProgressState = null;
+  let inMemoryFloatingBtnPosition = null;
+  let activeFloatingExportFormat = 'excel';
 
   // --- UTILITIES & VISIBILITY HELPERS ---
 
@@ -2352,6 +2354,18 @@
     }
   }
 
+  function updateFloatingButtonFormat(format) {
+    activeFloatingExportFormat = format === 'csv' ? 'csv' : 'excel';
+    const btn = document.querySelector('.gsc-downloader-floating-btn');
+    if (!btn) return;
+    const labelSuffix = activeFloatingExportFormat === 'csv' ? 'CSV' : 'Excel';
+    btn.title = `1-Click Export All Report Files (${labelSuffix}) • Drag to reposition`;
+    const textSpan = btn.querySelector('.gsc-floating-btn-text');
+    if (textSpan) {
+      textSpan.textContent = `1-Click Export Report (${labelSuffix})`;
+    }
+  }
+
   function injectFloatingButton() {
     const existing = document.getElementById('gsc-downloader-floating-root');
     if (existing) {
@@ -2365,43 +2379,145 @@
 
     const btn = document.createElement('button');
     btn.className = 'gsc-downloader-floating-btn';
-    btn.title = '1-Click Export All Report & Drilldown Files (Excel)';
+    btn.setAttribute('type', 'button');
+    const labelSuffix = activeFloatingExportFormat === 'csv' ? 'CSV' : 'Excel';
+    btn.title = `1-Click Export All Report & Drilldown Files (${labelSuffix}) • Drag to reposition`;
     btn.innerHTML = `
-      <svg viewBox="0 0 24 24">
+      <span class="gsc-drag-grip" title="Drag to reposition">⋮⋮</span>
+      <svg viewBox="0 0 24 24" class="gsc-floating-btn-icon">
         <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
       </svg>
-      <span>1-Click Export Report (Excel)</span>
+      <span class="gsc-floating-btn-text">1-Click Export Report (${labelSuffix})</span>
     `;
 
-    btn.addEventListener('click', () => {
-      let format = 'excel';
+    // Apply saved in-memory position if user moved it earlier during this window session
+    if (inMemoryFloatingBtnPosition) {
+      btn.style.left = `${inMemoryFloatingBtnPosition.left}px`;
+      btn.style.top = `${inMemoryFloatingBtnPosition.top}px`;
+      btn.style.right = 'auto';
+      btn.style.bottom = 'auto';
+    }
+
+    // --- DRAGGABLE IMPLEMENTATION ---
+    let isDragging = false;
+    let dragStartX = 0;
+    let dragStartY = 0;
+    let btnInitialLeft = 0;
+    let btnInitialTop = 0;
+    let hasMovedSignificantly = false;
+    let suppressNextClick = false;
+
+    btn.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return; // Only primary mouse button or touch
+
+      const rect = btn.getBoundingClientRect();
+      btnInitialLeft = rect.left;
+      btnInitialTop = rect.top;
+      dragStartX = e.clientX;
+      dragStartY = e.clientY;
+      isDragging = true;
+      hasMovedSignificantly = false;
+
+      try {
+        btn.setPointerCapture(e.pointerId);
+      } catch (_) {}
+    });
+
+    btn.addEventListener('pointermove', (e) => {
+      if (!isDragging) return;
+
+      const dx = e.clientX - dragStartX;
+      const dy = e.clientY - dragStartY;
+
+      if (!hasMovedSignificantly && (Math.abs(dx) > 4 || Math.abs(dy) > 4)) {
+        hasMovedSignificantly = true;
+        btn.classList.add('is-dragging');
+      }
+
+      if (hasMovedSignificantly) {
+        e.preventDefault();
+        const btnRect = btn.getBoundingClientRect();
+        const btnWidth = btnRect.width || 220;
+        const btnHeight = btnRect.height || 42;
+
+        let newLeft = btnInitialLeft + dx;
+        let newTop = btnInitialTop + dy;
+
+        // Keep inside window bounds with 8px margin
+        const maxLeft = Math.max(8, window.innerWidth - btnWidth - 8);
+        const maxTop = Math.max(8, window.innerHeight - btnHeight - 8);
+
+        newLeft = Math.max(8, Math.min(newLeft, maxLeft));
+        newTop = Math.max(8, Math.min(newTop, maxTop));
+
+        btn.style.left = `${newLeft}px`;
+        btn.style.top = `${newTop}px`;
+        btn.style.right = 'auto';
+        btn.style.bottom = 'auto';
+
+        inMemoryFloatingBtnPosition = { left: newLeft, top: newTop };
+      }
+    });
+
+    const finishDrag = (e) => {
+      if (!isDragging) return;
+      isDragging = false;
+
+      try {
+        btn.releasePointerCapture(e.pointerId);
+      } catch (_) {}
+
+      btn.classList.remove('is-dragging');
+
+      if (hasMovedSignificantly) {
+        suppressNextClick = true;
+        setTimeout(() => {
+          suppressNextClick = false;
+        }, 120);
+      }
+    };
+
+    btn.addEventListener('pointerup', finishDrag);
+    btn.addEventListener('pointercancel', finishDrag);
+
+    // Click handler for exporting
+    btn.addEventListener('click', (e) => {
+      if (suppressNextClick || hasMovedSignificantly) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+
       if (isExtensionValid()) {
         try {
           chrome.storage.local.get({ exportFormat: 'excel' }, (res) => {
-            if (chrome.runtime?.lastError) {
-              runBatchNativeExport({ format: 'excel' });
-            } else {
-              runBatchNativeExport({ format: res?.exportFormat || 'excel' });
-            }
+            const formatToUse = (res && res.exportFormat) ? res.exportFormat : activeFloatingExportFormat;
+            runBatchNativeExport({ format: formatToUse });
           });
           return;
         } catch (err) {
-          console.warn('GSC non-API Downloader: Extension context invalidated, using default settings.', err);
+          console.warn('GSC non-API Downloader: using cached format', err);
         }
       } else {
         showToast('Extension was updated. Please refresh the page (F5) to enable full features.', 'warning');
       }
-      runBatchNativeExport({ format });
+      runBatchNativeExport({ format: activeFloatingExportFormat });
     });
 
     container.appendChild(btn);
     document.body.appendChild(container);
 
+    // Load initial format & visibility settings from storage
     if (isExtensionValid()) {
       try {
-        chrome.storage.local.get({ showFloatingButton: true }, (res) => {
-          if (!chrome.runtime?.lastError && res && !res.showFloatingButton) {
-            container.style.display = 'none';
+        chrome.storage.local.get({ exportFormat: 'excel', showFloatingButton: true }, (res) => {
+          if (!chrome.runtime?.lastError && res) {
+            if (res.exportFormat) {
+              updateFloatingButtonFormat(res.exportFormat);
+            }
+            if (res.showFloatingButton === false) {
+              container.style.display = 'none';
+            }
           }
         });
       } catch (e) {}
@@ -2426,6 +2542,42 @@
     }, 4000);
   }
 
+  // Window resize listener to keep custom button position visible
+  window.addEventListener('resize', () => {
+    if (inMemoryFloatingBtnPosition) {
+      const btn = document.querySelector('.gsc-downloader-floating-btn');
+      if (btn) {
+        const btnRect = btn.getBoundingClientRect();
+        const maxLeft = Math.max(8, window.innerWidth - btnRect.width - 8);
+        const maxTop = Math.max(8, window.innerHeight - btnRect.height - 8);
+        const newLeft = Math.max(8, Math.min(inMemoryFloatingBtnPosition.left, maxLeft));
+        const newTop = Math.max(8, Math.min(inMemoryFloatingBtnPosition.top, maxTop));
+        btn.style.left = `${newLeft}px`;
+        btn.style.top = `${newTop}px`;
+        inMemoryFloatingBtnPosition = { left: newLeft, top: newTop };
+      }
+    }
+  });
+
+  // Storage listener to reactively update format and visibility across tabs
+  if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged) {
+    try {
+      chrome.storage.onChanged.addListener((changes, area) => {
+        if (area === 'local') {
+          if (changes.exportFormat && changes.exportFormat.newValue) {
+            updateFloatingButtonFormat(changes.exportFormat.newValue);
+          }
+          if (changes.showFloatingButton !== undefined) {
+            const container = document.getElementById('gsc-downloader-floating-root');
+            if (container) {
+              container.style.display = changes.showFloatingButton.newValue ? 'block' : 'none';
+            }
+          }
+        }
+      });
+    } catch (e) {}
+  }
+
   // --- MESSAGE LISTENER FOR POPUP ---
 
   if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
@@ -2433,8 +2585,16 @@
       const action = request.action;
 
       if (action === 'PING') {
-        const ver = (isExtensionValid() && chrome.runtime?.getManifest) ? chrome.runtime.getManifest().version : '3.1.3';
+        const ver = (isExtensionValid() && chrome.runtime?.getManifest) ? chrome.runtime.getManifest().version : '3.1.4';
         sendResponse({ pong: true, version: ver });
+        return true;
+      }
+
+      if (action === 'SET_EXPORT_FORMAT') {
+        if (request.format) {
+          updateFloatingButtonFormat(request.format);
+        }
+        sendResponse({ success: true });
         return true;
       }
 
@@ -2452,7 +2612,7 @@
 
       if (action === 'START_BATCH_EXPORT') {
         runBatchNativeExport({
-          format: request.format || 'excel',
+          format: request.format || activeFloatingExportFormat || 'excel',
           selectedTaskIds: request.selectedTaskIds || null,
           currentViewOnly: request.currentViewOnly === true
         })

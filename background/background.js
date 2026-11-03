@@ -1,5 +1,5 @@
 /**
- * GSC non-API Data Downloader - Background Service Worker (v3.1.3)
+ * GSC non-API Data Downloader - Background Service Worker (v3.1.4)
  * Coordinates script injection, configures automatic downloads, detects native GSC downloads,
  * and renames/organizes exported Excel (.xlsx) and CSV (.zip) files cleanly without save dialogs.
  */
@@ -44,7 +44,7 @@ chrome.runtime.onInstalled.addListener((details) => {
     });
   });
 
-  console.log('GSC non-API Data Downloader installed/updated (v3.1.3):', details.reason);
+  console.log('GSC non-API Data Downloader installed/updated (v3.1.4):', details.reason);
 });
 
 // Ensure latest content script is injected if user clicks action on an already open GSC tab
