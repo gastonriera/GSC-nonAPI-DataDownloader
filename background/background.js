@@ -1,11 +1,25 @@
 /**
- * GSC non-API Data Downloader - Background Service Worker (v3.1.8)
+ * GSC non-API Data Downloader - Background Service Worker (v3.1.9)
  * Coordinates script injection, configures automatic downloads, detects native GSC downloads,
- * and renames/organizes exported Excel (.xlsx) and CSV (.zip) files cleanly without save dialogs.
+ * and organizes all exported Excel (.xlsx) and CSV (.zip) files into a single date-stamped folder
+ * (GSC-Exports-YYYY-MM-DD) automatically without triggering save dialogs.
  */
 
-let pendingDownloadMeta = null;
+let pendingDownloadQueue = [];
+let lastDownloadMeta = null;
+let lastDownloadTime = 0;
 let downloadWaiters = [];
+
+/**
+ * Returns the current date in YYYY-MM-DD format based on local time.
+ */
+function getLocalDateString() {
+  const d = new Date();
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
 
 /**
  * Automatically grants multi-file download permissions to Google Search Console
@@ -13,20 +27,24 @@ let downloadWaiters = [];
  */
 function configureSiteDownloadPermissions() {
   if (chrome.contentSettings && chrome.contentSettings.automaticDownloads) {
-    try {
-      chrome.contentSettings.automaticDownloads.set({
-        primaryPattern: 'https://search.google.com/*',
-        setting: 'allow'
-      }, () => {
-        if (chrome.runtime.lastError) {
-          console.warn('Could not set automaticDownloads content setting:', chrome.runtime.lastError);
-        } else {
-          console.log('Automatic downloads explicitly allowed for https://search.google.com/*');
-        }
-      });
-    } catch (e) {
-      console.warn('Error setting automaticDownloads:', e);
-    }
+    const patterns = [
+      'https://search.google.com/*',
+      'https://*.google.com/*',
+      'https://*.googleusercontent.com/*'
+    ];
+
+    patterns.forEach((primaryPattern) => {
+      try {
+        chrome.contentSettings.automaticDownloads.set({
+          primaryPattern,
+          setting: 'allow'
+        }, () => {
+          if (chrome.runtime.lastError) {
+            // Silently ignore pattern restrictions
+          }
+        });
+      } catch (e) {}
+    });
   }
 }
 
@@ -40,11 +58,11 @@ chrome.runtime.onInstalled.addListener((details) => {
     chrome.storage.local.set({
       showFloatingButton: res.showFloatingButton !== undefined ? res.showFloatingButton : true,
       exportFormat: res.exportFormat || 'excel',
-      organizeSubfolder: res.organizeSubfolder !== undefined ? res.organizeSubfolder : true
+      organizeSubfolder: true // Always default to true so all files go into the date folder
     });
   });
 
-  console.log('GSC non-API Data Downloader installed/updated (v3.1.8):', details.reason);
+  console.log('GSC non-API Data Downloader installed/updated (v3.1.9):', details.reason);
 });
 
 // Ensure latest content script is injected if user clicks action on an already open GSC tab
@@ -86,9 +104,43 @@ function sanitizeSegment(str, maxLen = 45) {
     .slice(0, maxLen);
 }
 
+/**
+ * Checks whether a download originates from Google Search Console or Google services.
+ */
+function isGscDownload(downloadItem) {
+  const url = (downloadItem.url || '').toLowerCase();
+  const referrer = (downloadItem.referrer || '').toLowerCase();
+  const finalUrl = (downloadItem.finalUrl || '').toLowerCase();
+  const mime = (downloadItem.mime || '').toLowerCase();
+  const filename = (downloadItem.filename || '').toLowerCase();
+
+  const isGoogleDomain =
+    url.includes('search.google.com') ||
+    referrer.includes('search.google.com') ||
+    finalUrl.includes('search.google.com') ||
+    url.includes('googleusercontent.com') ||
+    finalUrl.includes('googleusercontent.com') ||
+    url.includes('.google.com') ||
+    referrer.includes('.google.com');
+
+  const isExportFile =
+    filename.endsWith('.xlsx') ||
+    filename.endsWith('.csv') ||
+    filename.endsWith('.zip') ||
+    mime.includes('spreadsheet') ||
+    mime.includes('excel') ||
+    mime.includes('zip') ||
+    mime.includes('csv');
+
+  const isRecentBatch = (Date.now() - lastDownloadTime < 60000);
+
+  return (isGoogleDomain && isExportFile) || (isRecentBatch && isExportFile) || isGoogleDomain || isRecentBatch;
+}
+
 // Listen for download creation so the content script knows immediately when GSC starts a file download
 if (chrome.downloads && chrome.downloads.onCreated) {
   chrome.downloads.onCreated.addListener((downloadItem) => {
+    lastDownloadTime = Date.now();
     if (downloadWaiters.length > 0) {
       const waiters = [...downloadWaiters];
       downloadWaiters = [];
@@ -97,65 +149,74 @@ if (chrome.downloads && chrome.downloads.onCreated) {
   });
 }
 
-// Rename and organize GSC exported files into clean paths without triggering save prompts
+// Rename and organize ALL GSC exported files into a single date folder (GSC-Exports-YYYY-MM-DD)
+// with conflictAction: 'uniquify' so Chrome never opens a Save As dialog
 if (chrome.downloads && chrome.downloads.onDeterminingFilename) {
   chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
-    const isFromGsc = Boolean(
-      (downloadItem.url && downloadItem.url.includes('search.google.com')) ||
-      (downloadItem.referrer && downloadItem.referrer.includes('search.google.com')) ||
-      (downloadItem.finalUrl && downloadItem.finalUrl.includes('search.google.com'))
-    );
+    try {
+      if (!isGscDownload(downloadItem)) {
+        suggest();
+        return;
+      }
 
-    const now = Date.now();
-    // Only rename if triggered by our extension within the last 20 seconds
-    if (pendingDownloadMeta && (now - pendingDownloadMeta.timestamp < 20000)) {
-      const meta = pendingDownloadMeta;
-      pendingDownloadMeta = null;
+      const dateStr = getLocalDateString();
+      const targetFolder = `GSC-Exports-${dateStr}`;
 
-      // Determine file extension from original filename (e.g. .xlsx, .zip, .csv)
-      const origName = downloadItem.filename || '';
+      // Purge queue items older than 60 seconds
+      const now = Date.now();
+      pendingDownloadQueue = pendingDownloadQueue.filter((m) => (now - m.timestamp < 60000));
+
+      // Retrieve next queued metadata item in first-in-first-out order
+      let meta = null;
+      if (pendingDownloadQueue.length > 0) {
+        meta = pendingDownloadQueue.shift();
+      } else if (lastDownloadMeta && (now - lastDownloadTime < 30000)) {
+        meta = lastDownloadMeta;
+      }
+
+      // Determine extension from original filename
+      const origName = (downloadItem.filename || 'GSC_Export.xlsx').replace(/^.*[\\\/]/, '');
       const extMatch = origName.match(/(\.[a-zA-Z0-9]{2,5})$/);
-      const ext = extMatch ? extMatch[1] : (meta.format === 'csv' ? '.zip' : '.xlsx');
+      const ext = extMatch ? extMatch[1] : (meta?.format === 'csv' ? '.zip' : '.xlsx');
 
-      const dateStr = new Date().toISOString().slice(0, 10);
-      const reportSlug = sanitizeSegment(meta.reportName || 'Report', 25);
-      const sectionSlug = sanitizeSegment(meta.section || '', 25);
-      const itemSlug = sanitizeSegment(meta.label || 'Export', 45);
-      const idxPrefix = meta.index ? `${String(meta.index).padStart(2, '0')}_` : '';
+      let finalFileName = origName;
 
-      const nameParts = [reportSlug];
-      if (sectionSlug && sectionSlug.toLowerCase() !== reportSlug.toLowerCase() && sectionSlug.toLowerCase() !== itemSlug.toLowerCase()) {
-        nameParts.push(sectionSlug);
+      if (meta) {
+        const reportSlug = sanitizeSegment(meta.reportName || 'Report', 25);
+        const sectionSlug = sanitizeSegment(meta.section || '', 25);
+        const itemSlug = sanitizeSegment(meta.label || 'Export', 45);
+        const idxPrefix = meta.index ? `${String(meta.index).padStart(2, '0')}_` : '';
+
+        const nameParts = [reportSlug];
+        if (sectionSlug && sectionSlug.toLowerCase() !== reportSlug.toLowerCase() && sectionSlug.toLowerCase() !== itemSlug.toLowerCase()) {
+          nameParts.push(sectionSlug);
+        }
+        if (itemSlug && itemSlug.toLowerCase() !== reportSlug.toLowerCase()) {
+          nameParts.push(itemSlug);
+        }
+
+        finalFileName = `${idxPrefix}${nameParts.join('__')}${ext}`;
+      } else {
+        const cleanBase = origName.replace(/\.[a-zA-Z0-9]+$/, '');
+        finalFileName = `${sanitizeSegment(cleanBase, 50)}${ext}`;
       }
-      if (itemSlug && itemSlug.toLowerCase() !== reportSlug.toLowerCase()) {
-        nameParts.push(itemSlug);
-      }
 
-      const finalFileName = `${idxPrefix}${nameParts.join('__')}${ext}`;
-      const useSubfolder = meta.organizeSubfolder !== false;
-      const fullPath = useSubfolder
-        ? `GSC-Exports/${dateStr}/${finalFileName}`
-        : `GSC_${dateStr}_${finalFileName}`;
+      // Ensure every single file is placed inside the target date folder
+      const fullPath = `${targetFolder}/${finalFileName}`;
 
-      // Setting conflictAction to 'uniquify' prevents Chrome from opening a Save As collision dialog
       suggest({
         filename: fullPath,
         conflictAction: 'uniquify'
       });
-      return;
-    }
-
-    // For any native GSC download without metadata, ensure uniquify to prevent overwrite prompts
-    if (isFromGsc) {
-      const cleanOrigName = (downloadItem.filename || 'GSC_Export.xlsx').replace(/^.*[\\\/]/, '');
+    } catch (err) {
+      console.warn('GSC Downloader: Error determining filename:', err);
+      const dateStr = getLocalDateString();
+      const fallbackName = (downloadItem.filename || 'GSC_Export.xlsx').replace(/^.*[\\\/]/, '');
       suggest({
-        filename: cleanOrigName,
+        filename: `GSC-Exports-${dateStr}/${fallbackName}`,
         conflictAction: 'uniquify'
       });
-      return;
     }
-
-    suggest();
   });
 }
 
@@ -168,21 +229,19 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'PREPARE_DOWNLOAD') {
-    chrome.storage.local.get({ organizeSubfolder: true }, (stored) => {
-      pendingDownloadMeta = {
-        ...request.meta,
-        organizeSubfolder: request.meta?.organizeSubfolder !== undefined
-          ? request.meta.organizeSubfolder
-          : stored.organizeSubfolder,
-        timestamp: Date.now()
-      };
-      sendResponse({ success: true });
-    });
+    const metaItem = {
+      ...request.meta,
+      timestamp: Date.now()
+    };
+    pendingDownloadQueue.push(metaItem);
+    lastDownloadMeta = metaItem;
+    lastDownloadTime = Date.now();
+    sendResponse({ success: true, queueLength: pendingDownloadQueue.length });
     return true;
   }
 
   if (request.action === 'WAIT_FOR_DOWNLOAD') {
-    const timeoutMs = request.timeoutMs || 4500;
+    const timeoutMs = request.timeoutMs || 6500;
     let resolved = false;
 
     const timer = setTimeout(() => {

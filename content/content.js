@@ -1,5 +1,5 @@
 /**
- * GSC non-API Data Downloader - Content Script (v3.1.8)
+ * GSC non-API Data Downloader - Content Script (v3.1.9)
  * Automates Google Search Console's native Export menu ("Download Excel" / "Download CSV")
  * across the main report AND all sub-reports/drilldowns for:
  * 1. Page Indexing (Indexed pages + all "Why pages aren't indexed" reason drilldowns)
@@ -11,8 +11,8 @@
 (function () {
   'use strict';
 
-  if (window.__GSC_DOWNLOADER_V318_INITIALIZED__) return;
-  window.__GSC_DOWNLOADER_V318_INITIALIZED__ = true;
+  if (window.__GSC_DOWNLOADER_V319_INITIALIZED__) return;
+  window.__GSC_DOWNLOADER_V319_INITIALIZED__ = true;
 
   let isBatchRunning = false;
   let cancelBatchRequested = false;
@@ -548,7 +548,7 @@
     const downloadWaitPromise = new Promise((resolve) => {
       if (isExtensionValid() && chrome.runtime?.sendMessage) {
         try {
-          chrome.runtime.sendMessage({ action: 'WAIT_FOR_DOWNLOAD', timeoutMs: 5500 }, (res) => {
+          chrome.runtime.sendMessage({ action: 'WAIT_FOR_DOWNLOAD', timeoutMs: 6500 }, (res) => {
             if (chrome.runtime?.lastError || !res) {
               resolve({ started: false });
               return;
@@ -2954,7 +2954,7 @@
       const action = request.action;
 
       if (action === 'PING') {
-        const ver = (isExtensionValid() && chrome.runtime?.getManifest) ? chrome.runtime.getManifest().version : '3.1.8';
+        const ver = (isExtensionValid() && chrome.runtime?.getManifest) ? chrome.runtime.getManifest().version : '3.1.9';
         sendResponse({ pong: true, version: ver });
         return true;
       }

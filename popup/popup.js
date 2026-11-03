@@ -1,5 +1,5 @@
 /**
- * GSC non-API Data Downloader - Popup Controller (v3.1.8)
+ * GSC non-API Data Downloader - Popup Controller (v3.1.9)
  * Controls native report & drilldown export selection, format preferences,
  * and macOS silent download configuration.
  */
