@@ -1,9 +1,9 @@
 /**
- * GSC non-API Data Downloader - Content Script (v3.1.5)
+ * GSC non-API Data Downloader - Content Script (v3.1.6)
  * Automates Google Search Console's native Export menu ("Download Excel" / "Download CSV")
  * across the main report AND all sub-reports/drilldowns for:
  * 1. Page Indexing (Indexed pages + all "Why pages aren't indexed" reason drilldowns)
- * 2. Crawl Stats (Universal 25-row pagination expansion, 90-day overview chart,
+ * 2. Crawl Stats (Section-by-section 25-row pagination expansion & downloading across
  *    all crawl breakdown tables [By response, By file type, By purpose, By Googlebot type],
  *    Host status [Robots.txt fetch, DNS resolution, Server connectivity], and Hosts)
  * 3. Core Web Vitals (Mobile & Desktop reports + Good URLs + all issue drilldowns)
@@ -12,8 +12,8 @@
 (function () {
   'use strict';
 
-  if (window.__GSC_DOWNLOADER_V315_INITIALIZED__) return;
-  window.__GSC_DOWNLOADER_V315_INITIALIZED__ = true;
+  if (window.__GSC_DOWNLOADER_V316_INITIALIZED__) return;
+  window.__GSC_DOWNLOADER_V316_INITIALIZED__ = true;
 
   let isBatchRunning = false;
   let cancelBatchRequested = false;
@@ -1746,6 +1746,38 @@
   }
 
   /**
+   * Expands a single specific breakdown card on Crawl Stats to 25 rows per page.
+   * Matches heading using targetId and targetSectionName.
+   */
+  async function expandBreakdownSectionTo25(targetId, targetSectionName) {
+    const headings = findCrawlStatsBreakdownHeadings();
+    const item = headings.find(
+      (h) => h.id === targetId || h.section.toLowerCase() === targetSectionName.toLowerCase()
+    );
+
+    if (!item) {
+      console.log(`GSC non-API Downloader: Heading for "${targetSectionName}" not found on page.`);
+      return false;
+    }
+
+    const scopes = getBreakdownCardScopeElements(item, headings);
+    let anyChanged = false;
+    for (const scope of scopes) {
+      try {
+        const changed = await expandCardTo25(scope, item.section);
+        if (changed) anyChanged = true;
+      } catch (e) {
+        console.warn(`GSC non-API Downloader: Error expanding card for "${item.section}"`, e);
+      }
+    }
+
+    if (anyChanged) {
+      await sleep(400);
+    }
+    return anyChanged;
+  }
+
+  /**
    * Finds all clickable drilldown rows in tables on the current Overview page:
    * - Page Indexing: "Why pages aren't indexed", "Improve page experience"
    * - Crawl Stats: "By response", "By file type", "By purpose", "By Googlebot type", "Host status", "Hosts", etc.
@@ -2224,6 +2256,284 @@
 
   // --- BATCH AUTOMATION RUNNER ---
 
+  /**
+   * Executes a section-by-section Crawl Stats batch export:
+   * 1. Exports Main Overview 90-day charts (if included).
+   * 2. Expands "By response" to 25 rows -> downloads all data from "By response".
+   * 3. Expands "By file type" to 25 rows -> downloads all data from "By file type".
+   * 4. Expands "By purpose" to 25 rows -> downloads all data from "By purpose".
+   * 5. Expands "By Googlebot type" to 25 rows -> downloads all data from "By Googlebot type".
+   * 6. Downloads all remaining sections (Host status, Hosts, etc.).
+   */
+  async function runCrawlStatsSectionBySectionExport(format, selectedTaskIds, allTasks) {
+    isBatchRunning = true;
+    cancelBatchRequested = false;
+    let exportedCount = 0;
+    let skippedCount = 0;
+    let fileIndex = 1;
+
+    try {
+      // 0. Export Main Overview (90-Day Charts) if not filtered out
+      const hasMainOverviewTask = allTasks.some((t) => t.id === 'main-overview');
+      const shouldExportOverview = hasMainOverviewTask && (!selectedTaskIds || selectedTaskIds.includes('main-overview'));
+
+      if (shouldExportOverview && !cancelBatchRequested) {
+        showProgressPanel(fileIndex, null, 'Crawl Stats Overview (90-Day Charts)');
+        const res = await triggerSingleNativeExport(format, {
+          reportName: 'Crawl_Stats',
+          section: 'Overview',
+          label: 'Crawl_Stats_Overview',
+          index: fileIndex
+        });
+        if (res.success) {
+          exportedCount++;
+          fileIndex++;
+        } else {
+          skippedCount++;
+        }
+        await sleep(400);
+      }
+
+      // The 4 crawl requests breakdowns in exact sequential order
+      const breakdownSections = [
+        { id: 'by-response', name: 'By response' },
+        { id: 'by-file-type', name: 'By file type' },
+        { id: 'by-purpose', name: 'By purpose' },
+        { id: 'by-googlebot', name: 'By Googlebot type' }
+      ];
+
+      for (const section of breakdownSections) {
+        if (cancelBatchRequested) break;
+
+        // If user specified selectedTaskIds, check if any tasks for this section were selected
+        if (selectedTaskIds && selectedTaskIds.length > 0) {
+          const hasSelectedInThisSection = selectedTaskIds.some(
+            (id) => id.startsWith(`row::${section.name}::`) || id.includes(section.name)
+          );
+          if (!hasSelectedInThisSection) {
+            continue;
+          }
+        }
+
+        // A. Expand this specific section to 25 rows
+        showProgressPanel(fileIndex, null, `Expanding "${section.name}" to 25 rows...`);
+        await expandBreakdownSectionTo25(section.id, section.name);
+        await sleep(350);
+
+        if (cancelBatchRequested) break;
+
+        // B. Discover all rows currently visible in this section
+        const freshRows = findClickableTableRows(detectReportInfo());
+        let sectionRows = freshRows.filter((r) => r.section === section.name);
+
+        if (selectedTaskIds && selectedTaskIds.length > 0) {
+          sectionRows = sectionRows.filter(
+            (r) =>
+              selectedTaskIds.includes(`row::${r.key}`) ||
+              selectedTaskIds.some((id) => id.includes(r.label))
+          );
+        }
+
+        console.log(`GSC non-API Downloader: Found ${sectionRows.length} rows for section "${section.name}"`);
+
+        // C. Download all rows in this section sequentially
+        for (let j = 0; j < sectionRows.length; j++) {
+          if (cancelBatchRequested) break;
+
+          const targetRow = sectionRows[j];
+          showProgressPanel(fileIndex, null, `${section.name} (${j + 1}/${sectionRows.length}): ${targetRow.label}`);
+
+          const overviewState = captureViewState();
+
+          // Find live row element in DOM
+          let liveRows = findClickableTableRows(detectReportInfo());
+          let rowToClick =
+            liveRows.find((r) => r.key === targetRow.key || (r.section === section.name && r.label === targetRow.label)) ||
+            liveRows.find((r) => r.section === section.name && r.label.toLowerCase() === targetRow.label.toLowerCase());
+
+          // If row is not found (for example if GSC reset table to 10 rows on return), re-expand to 25!
+          if (!rowToClick) {
+            await expandBreakdownSectionTo25(section.id, section.name);
+            liveRows = findClickableTableRows(detectReportInfo());
+            rowToClick =
+              liveRows.find((r) => r.key === targetRow.key || (r.section === section.name && r.label === targetRow.label)) ||
+              targetRow;
+          }
+
+          const navigated = await openDrilldownRow(rowToClick, overviewState);
+          if (navigated) {
+            const res = await triggerSingleNativeExport(
+              format,
+              {
+                reportName: 'Crawl_Stats',
+                section: section.name,
+                label: targetRow.label,
+                index: fileIndex
+              },
+              overviewState.exportBtn
+            );
+
+            if (res.success) {
+              exportedCount++;
+              fileIndex++;
+            } else {
+              skippedCount++;
+            }
+
+            await returnToViewState(overviewState);
+            await sleep(350);
+          } else {
+            skippedCount++;
+          }
+        }
+      }
+
+      // 5. Host status and Hosts sections
+      const otherSections = [
+        { id: 'host-status', name: 'Host status' },
+        { id: 'hosts', name: 'Hosts' }
+      ];
+
+      for (const section of otherSections) {
+        if (cancelBatchRequested) break;
+
+        let liveRows = findClickableTableRows(detectReportInfo());
+        let sectionRows = liveRows.filter((r) => r.section === section.name);
+
+        if (selectedTaskIds && selectedTaskIds.length > 0) {
+          sectionRows = sectionRows.filter(
+            (r) =>
+              selectedTaskIds.includes(`row::${r.key}`) ||
+              selectedTaskIds.some((id) => id.includes(r.label))
+          );
+        }
+
+        if (sectionRows.length === 0) continue;
+
+        // Try expanding if it has a paginator
+        await expandBreakdownSectionTo25(section.id, section.name);
+        liveRows = findClickableTableRows(detectReportInfo());
+        sectionRows = liveRows.filter((r) => r.section === section.name);
+
+        if (selectedTaskIds && selectedTaskIds.length > 0) {
+          sectionRows = sectionRows.filter(
+            (r) =>
+              selectedTaskIds.includes(`row::${r.key}`) ||
+              selectedTaskIds.some((id) => id.includes(r.label))
+          );
+        }
+
+        for (let j = 0; j < sectionRows.length; j++) {
+          if (cancelBatchRequested) break;
+
+          const targetRow = sectionRows[j];
+          showProgressPanel(fileIndex, null, `${section.name} (${j + 1}/${sectionRows.length}): ${targetRow.label}`);
+
+          const overviewState = captureViewState();
+          const currentRows = findClickableTableRows(detectReportInfo());
+          const rowToClick =
+            currentRows.find((r) => r.key === targetRow.key || (r.section === section.name && r.label === targetRow.label)) ||
+            targetRow;
+
+          const navigated = await openDrilldownRow(rowToClick, overviewState);
+          if (navigated) {
+            const res = await triggerSingleNativeExport(
+              format,
+              {
+                reportName: 'Crawl_Stats',
+                section: section.name,
+                label: targetRow.label,
+                index: fileIndex
+              },
+              overviewState.exportBtn
+            );
+
+            if (res.success) {
+              exportedCount++;
+              fileIndex++;
+            } else {
+              skippedCount++;
+            }
+
+            await returnToViewState(overviewState);
+            await sleep(350);
+          } else {
+            skippedCount++;
+          }
+        }
+      }
+
+      // 6. Catch any remaining rows not covered above
+      const processedSections = ['By response', 'By file type', 'By purpose', 'By Googlebot type', 'Host status', 'Hosts'];
+      const liveRemainingRows = findClickableTableRows(detectReportInfo()).filter(
+        (r) => !processedSections.includes(r.section)
+      );
+
+      for (let j = 0; j < liveRemainingRows.length; j++) {
+        if (cancelBatchRequested) break;
+
+        const targetRow = liveRemainingRows[j];
+        if (selectedTaskIds && selectedTaskIds.length > 0) {
+          if (!selectedTaskIds.includes(`row::${targetRow.key}`) && !selectedTaskIds.some((id) => id.includes(targetRow.label))) {
+            continue;
+          }
+        }
+
+        showProgressPanel(fileIndex, null, `${targetRow.section}: ${targetRow.label}`);
+        const overviewState = captureViewState();
+        const currentRows = findClickableTableRows(detectReportInfo());
+        const rowToClick =
+          currentRows.find((r) => r.key === targetRow.key || r.label === targetRow.label) || targetRow;
+
+        const navigated = await openDrilldownRow(rowToClick, overviewState);
+        if (navigated) {
+          const res = await triggerSingleNativeExport(
+            format,
+            {
+              reportName: 'Crawl_Stats',
+              section: targetRow.section,
+              label: targetRow.label,
+              index: fileIndex
+            },
+            overviewState.exportBtn
+          );
+
+          if (res.success) {
+            exportedCount++;
+            fileIndex++;
+          } else {
+            skippedCount++;
+          }
+
+          await returnToViewState(overviewState);
+          await sleep(350);
+        } else {
+          skippedCount++;
+        }
+      }
+
+      hideProgressPanel();
+      if (!cancelBatchRequested) {
+        showToast(
+          `Finished! Downloaded ${exportedCount} ${format === 'csv' ? 'CSV (.zip)' : 'Excel (.xlsx)'} file(s).`,
+          exportedCount > 0 ? 'success' : 'error'
+        );
+      } else {
+        showToast(`Export stopped (${exportedCount} file(s) downloaded).`, 'info');
+      }
+
+      return {
+        success: exportedCount > 0,
+        exportedCount,
+        skippedCount
+      };
+    } finally {
+      isBatchRunning = false;
+      batchProgressState = null;
+      hideProgressPanel();
+    }
+  }
+
   async function runBatchNativeExport(options = {}) {
     if (isBatchRunning) {
       return { success: false, error: 'An export batch is already in progress.' };
@@ -2252,13 +2562,14 @@
       return res;
     }
 
-    // On Crawl Stats, at the very beginning expand all breakdown tables to 25 rows per page
+    // On Crawl Stats, execute section-by-section:
+    // Expand "By response" to 25 rows -> download all data from "By response"
+    // -> Expand "By file type" to 25 rows -> download all data from "By file type"
+    // -> Expand "By purpose" to 25 rows -> download all data from "By purpose"
+    // -> Expand "By Googlebot type" to 25 rows -> download all data from "By Googlebot type"
+    // -> Download remaining sections (Host status, Hosts, etc.)
     if (reportInfo.reportType === 'crawl-stats' && !reportInfo.isDrilldown) {
-      showProgressPanel(1, 1, 'Expanding breakdown tables to 25 rows per page...');
-      await expandAllCrawlStatsBreakdownsTo25();
-      const refreshed = discoverExportTasks();
-      reportInfo = refreshed.reportInfo;
-      allTasks = refreshed.tasks;
+      return await runCrawlStatsSectionBySectionExport(format, selectedTaskIds, allTasks);
     }
 
     const tasksToRun = selectedTaskIds
@@ -2620,8 +2931,9 @@
     }
 
     panel.style.display = 'flex';
-    const pct = total > 0 ? Math.round((current / total) * 100) : 50;
-    panel.querySelector('#gsc-prog-title-text').textContent = `Exporting (${current} of ${total})`;
+    const pct = (total && total > 0) ? Math.min(100, Math.round((current / total) * 100)) : 100;
+    const titleText = (total && total > 0) ? `Exporting (${current} of ${total})` : (current ? `Exporting file #${current}` : 'Exporting GSC Reports...');
+    panel.querySelector('#gsc-prog-title-text').textContent = titleText;
     panel.querySelector('#gsc-prog-step-text').textContent = stepLabel;
     panel.querySelector('#gsc-prog-bar-fill').style.width = `${pct}%`;
   }
@@ -2864,7 +3176,7 @@
       const action = request.action;
 
       if (action === 'PING') {
-        const ver = (isExtensionValid() && chrome.runtime?.getManifest) ? chrome.runtime.getManifest().version : '3.1.5';
+        const ver = (isExtensionValid() && chrome.runtime?.getManifest) ? chrome.runtime.getManifest().version : '3.1.6';
         sendResponse({ pong: true, version: ver });
         return true;
       }
